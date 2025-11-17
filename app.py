@@ -6,9 +6,18 @@ from datetime import date, timedelta
 
 def download_prices(ticker, start, end):
     data = yf.download(ticker, start=start, end=end)
+
     if data.empty:
         return None
-    return data["Adj Close"].dropna()
+
+    # Manejar nombres posibles
+    for col in ["Adj Close", "Close", "close", "adjclose"]:
+        if col in data.columns:
+            return data[col].dropna()
+
+    # Si no encuentra ninguna
+    return None
+
 
 def train_test_split(series, test_size=0.2):
     n = len(series)

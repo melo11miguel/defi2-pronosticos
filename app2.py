@@ -3,9 +3,12 @@ import yfinance as yf
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_squared_error
+import plotly.express as px # Importamos Plotly para gráficos avanzados
 
 # --- Configuración de la Aplicación Streamlit ---
-st.set_page_config(layout="wide", page_title="Modelado Financiero y Backtesting")
+# Mejoramos el título y el layout
+st.set_page_config(layout="wide", page_title="Modelado Financiero y Backtesting", 
+                   initial_sidebar_state="expanded")
 
 # --- Funciones de Modelos y Simulación ---
 
@@ -17,7 +20,6 @@ def estimate_gbm_parameters(log_returns):
 
 def simulate_gbm(S0, mu, sigma, T, N_paths, N_steps):
     """Simulación de Movimiento Browniano Geométrico."""
-    # Corrección de seguridad: Aseguramos que los parámetros de entrada sean escalares (float)
     S0 = float(S0)
     mu = float(mu)
     sigma = float(sigma)
@@ -27,9 +29,7 @@ def simulate_gbm(S0, mu, sigma, T, N_paths, N_steps):
     paths[0] = S0
     
     for t in range(1, N_steps + 1):
-        # Generar movimientos brownianos
         dW = np.random.normal(0, np.sqrt(dt), N_paths)
-        # La operación es puramente NumPy
         paths[t] = paths[t-1] * np.exp((mu - 0.5 * sigma**2) * dt + sigma * dW)
         
     return paths
@@ -47,7 +47,6 @@ def simulate_heston(S0, V0, mu, kappa, theta, sigma_v, rho, T, N_paths, N_steps)
     v_paths[0] = V0
     
     for t in range(1, N_steps + 1):
-        # Generar números aleatorios correlacionados
         z1 = np.random.normal(0.0, 1.0, N_paths)
         z2 = rho * z1 + np.sqrt(1 - rho**2) * np.random.normal(0.0, 1.0, N_paths)
         
@@ -55,7 +54,7 @@ def simulate_heston(S0, V0, mu, kappa, theta, sigma_v, rho, T, N_paths, N_steps)
         dv = kappa * (theta - v_paths[t-1]) * dt + sigma_v * np.sqrt(v_paths[t-1]) * np.sqrt(dt) * z2
         v_paths[t] = v_paths[t-1] + dv
         
-        # Asegurar que la volatilidad no sea negativa (Full Truncation Scheme)
+        # Asegurar que la volatilidad no sea negativa
         v_paths[t] = np.maximum(v_paths[t], 1e-6)
         
         # Simulación del precio de la acción
@@ -159,8 +158,9 @@ def backtest_model(df_prices, model_func, model_name, N_paths, T_test_days, **pa
     
     # Asegurarse de que las longitudes coincidan
     
-    # Corrección para garantizar que actual_prices sea un array 1D
+    # Usamos .values.flatten() para garantizar que sea 1D
     actual_prices = test_prices.values.flatten()
+    # Excluimos el punto inicial (S0) que ya está en el set de entrenamiento
     predicted_prices = simulated_mean[1:] 
     
     if len(actual_prices) != len(predicted_prices):
@@ -184,20 +184,19 @@ def backtest_model(df_prices, model_func, model_name, N_paths, T_test_days, **pa
 # --- Función Principal de Streamlit ---
 
 def main():
-    st.title("💸 Modelado de Precios de Activos y Backtesting")
-    st.markdown("---")
+    st.title("📈 Modelado de Precios de Activos y Backtesting")
+    st.markdown("Una herramienta para comparar modelos de precios estocásticos (GBM, Heston y Merton) mediante simulación Monte Carlo.")
 
     col1, col2 = st.columns([1, 2])
 
     with col1:
-        st.header("Configuración de la Aplicación")
+        st.header("⚙️ Configuración de la Aplicación")
         
         # 1. Entrada de Ticker
         ticker = st.text_input("Ingrese el Símbolo del Activo (Ticker)", "AAPL").upper()
         
         # 2. Configuración de Datos
         start_date = st.date_input("Fecha de Inicio de Datos", pd.to_datetime("2020-01-01"))
-        # Usamos yesterday como sugerencia predeterminada
         yesterday = pd.to_datetime("today") - pd.Timedelta(days=1)
         end_date = st.date_input("Fecha de Fin de Datos", yesterday)
         
@@ -206,17 +205,17 @@ def main():
         test_days = st.slider("Días a Predecir (Backtest)", 10, 60, 21)
         n_paths = st.slider("Número de Trayectorias de Simulación", 100, 1000, 300)
         
-        # 4. Parámetros de Heston (Para demostración)
+        # 4. Parámetros de Heston
         st.subheader("Parámetros de Heston (Aprox.)")
-        st.caption("La calibración precisa requiere datos de opciones.")
+        st.caption("Ajuste estos parámetros para ver su impacto en la predicción.")
         kappa = st.number_input("Tasa de Reversión (kappa)", 0.01, 5.0, 1.5, 0.1)
         theta = st.number_input("Varianza de Largo Plazo (theta)", 0.01, 1.0, 0.05, 0.01)
         sigma_v = st.number_input("Volatilidad de la Varianza (sigma_v)", 0.01, 5.0, 0.2, 0.05)
         rho = st.number_input("Correlación (rho)", -1.0, 1.0, -0.7, 0.1)
         
-        # 5. Parámetros de Merton (Para demostración)
+        # 5. Parámetros de Merton
         st.subheader("Parámetros de Merton (Aprox.)")
-        st.caption("La calibración precisa requiere inferencia estadística avanzada.")
+        st.caption("Estos controlan la frecuencia y magnitud de los saltos.")
         lambda_j = st.number_input("Frecuencia de Salto (lambda_j)", 0.01, 1.0, 0.2, 0.05)
         m = st.number_input("Tamaño Promedio de Salto (m)", -0.5, 0.5, -0.05, 0.01)
         v = st.number_input("Volatilidad del Salto (v)", 0.01, 0.5, 0.1, 0.01)
@@ -229,15 +228,13 @@ def main():
             st.subheader(f"1. Descarga de Datos: {ticker}")
             
             try:
-                # Descargar datos
                 data = yf.download(ticker, start=start_date, end=end_date, progress=False)
 
-                # Verificar si el DataFrame está vacío
                 if data.empty:
-                    st.error(f"No se encontraron datos históricos para el ticker {ticker} entre {start_date} y {end_date}. Intente con un rango de fechas diferente o un ticker válido.")
+                    st.error(f"No se encontraron datos históricos para el ticker {ticker}.")
                     return
 
-                # Lógica de Respaldo: Usar 'Close' si 'Adj Close' no existe
+                # Priorizar 'Adj Close', si no, usar 'Close'
                 if 'Adj Close' in data.columns:
                     df_prices = data['Adj Close'].dropna()
                     columna_usada = 'Cierre Ajustado (Adj Close)'
@@ -245,18 +242,15 @@ def main():
                     df_prices = data['Close'].dropna()
                     columna_usada = 'Cierre (Close)'
                 else:
-                    st.error("Error: No se encontró la columna 'Adj Close' ni 'Close' en los datos descargados. Verifique el ticker (símbolo).")
+                    st.error("Error: No se encontró la columna de precios requerida.")
                     return
-
 
                 if df_prices.empty:
-                    st.error(f"Error: La columna {columna_usada} está vacía después de limpiar valores nulos. Revise las fechas y el ticker.")
+                    st.error(f"Error: La columna {columna_usada} está vacía.")
                     return
 
-                st.write(f"Primeras 5 filas de precios, usando: **{columna_usada}**")
-                st.dataframe(df_prices.head())
+                st.write(f"Precios históricos, usando: **{columna_usada}**")
                 
-                # Definir conjuntos de entrenamiento y prueba para backtesting
                 if len(df_prices) <= test_days:
                     st.error(f"Error: No hay suficientes datos ({len(df_prices)} puntos) para realizar un backtesting de {test_days} días.")
                     return
@@ -272,35 +266,15 @@ def main():
             st.subheader("2. Resultados del Backtesting y RMSE")
             
             # --- GBM ---
-            rmse_gbm, results_gbm = backtest_model(
-                df_prices=df_prices, 
-                model_func=simulate_gbm, 
-                model_name="GBM", 
-                N_paths=n_paths, 
-                T_test_days=test_days
-            )
+            rmse_gbm, results_gbm = backtest_model(df_prices, simulate_gbm, "GBM", n_paths, test_days)
             
             # --- Heston ---
             heston_params = {'kappa': kappa, 'theta': theta, 'sigma_v': sigma_v, 'rho': rho}
-            rmse_heston, results_heston = backtest_model(
-                df_prices=df_prices, 
-                model_func=simulate_heston, 
-                model_name="Heston", 
-                N_paths=n_paths, 
-                T_test_days=test_days,
-                **heston_params
-            )
+            rmse_heston, results_heston = backtest_model(df_prices, simulate_heston, "Heston", n_paths, test_days, **heston_params)
 
             # --- Merton ---
             merton_params = {'lambda_j': lambda_j, 'm': m, 'v': v}
-            rmse_merton, results_merton = backtest_model(
-                df_prices=df_prices, 
-                model_func=simulate_merton, 
-                model_name="Merton", 
-                N_paths=n_paths, 
-                T_test_days=test_days,
-                **merton_params
-            )
+            rmse_merton, results_merton = backtest_model(df_prices, simulate_merton, "Merton", n_paths, test_days, **merton_params)
             
             # --- 3. Consolidar Resultados ---
             
@@ -321,21 +295,69 @@ def main():
             st.markdown("---")
             st.subheader("4. Visualización de la Predicción (Backtest)")
             
-            # CORRECCIÓN AQUÍ: Convertir la Serie a DataFrame de forma robusta
-            # Esto evita el error: AttributeError: 'Series' object has no attribute 'to_frame'
-            train_plot = pd.DataFrame(train_prices, columns=['Precio'])
+            # Conversión robusta de Serie a DataFrame para el entrenamiento
+            train_plot = pd.DataFrame(train_prices)
+            train_plot.columns = ['Precio Real']
 
+            # Combinar los resultados simulados y reales (solo la parte del test)
+            combined_df_test = results_gbm.join(results_heston.iloc[:, 1]).join(results_merton.iloc[:, 1])
+            combined_df_test.columns = ['Precio Real', 'GBM', 'Heston', 'Merton']
             
-            # Combinar los resultados simulados y reales
-            combined_df = results_gbm.join(results_heston.iloc[:, 1]).join(results_merton.iloc[:, 1])
-            combined_df.columns = ['Precio Real', 'GBM', 'Heston', 'Merton']
+            # Renombramos la columna de precio real del set de entrenamiento para evitar duplicados en el concat
+            train_plot.columns = ['Real (Histórico)']
+
+            # Usamos pd.concat para unir el histórico y el test simulado
+            plot_df = pd.concat([train_plot, combined_df_test.drop(columns=['Precio Real'])], axis=0)
+
+            # Renombrar para claridad en la leyenda del gráfico final
+            plot_df = plot_df.rename(columns={'Real (Histórico)': 'Precio Real'})
             
-            # Agregar los datos simulados
-            plot_df = pd.concat([train_plot, combined_df], axis=0)
+            # Reestructurar el DataFrame de ancho a largo para Plotly
+            plot_long = plot_df.reset_index().melt(
+                id_vars='Date', 
+                value_vars=['Precio Real', 'GBM', 'Heston', 'Merton'], 
+                var_name='Modelo', 
+                value_name='Precio'
+            ).dropna()
+
+            # --- Generar el Gráfico Interactivo con Plotly ---
             
-            # Crear un gráfico interactivo
-            st.line_chart(plot_df, height=500)
-            st.caption(f"El Backtest compara el precio real vs. el precio promedio simulado para los últimos {test_days} días.")
+            # Definición de colores para las series
+            color_map = {
+                'Precio Real': 'white', # Precio real, más destacado
+                'GBM': '#3366ff',    # Azul
+                'Heston': '#ff9900',  # Naranja/Amarillo
+                'Merton': '#cc00cc'   # Púrpura
+            }
+            
+            fig = px.line(
+                plot_long, 
+                x='Date', 
+                y='Precio', 
+                color='Modelo', 
+                title=f'Backtesting de Precios de {ticker}',
+                color_discrete_map=color_map,
+                template='plotly_dark' # Usamos un tema oscuro para Streamlit
+            )
+            
+            # Añadir una línea vertical para separar la zona de entrenamiento/test
+            split_date = test_prices.index[0]
+            fig.add_vline(x=split_date, line_width=2, line_dash="dash", line_color="red", 
+                          annotation_text="Inicio del Backtest", 
+                          annotation_position="top right")
+
+            # Mejorar el layout para el contexto financiero
+            fig.update_layout(
+                xaxis_title="Fecha",
+                yaxis_title="Precio (USD)",
+                legend_title="Leyenda",
+                hovermode="x unified",
+                height=600 # Aumentar la altura para una mejor visualización
+            )
+            
+            # Mostrar el gráfico interactivo de Plotly
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption(f"El gráfico muestra el precio histórico (línea blanca) y el precio real (línea blanca, después de la línea roja) comparado con el promedio de las simulaciones Monte Carlo para los últimos {test_days} días.")
 
 if __name__ == "__main__":
     main()

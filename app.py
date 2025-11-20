@@ -1,313 +1,459 @@
-import streamlit as st
-import yfinance as yf
 import numpy as np
 import pandas as pd
+import yfinance as yf
+import matplotlib.pyplot as plt
+import streamlit as st
 from datetime import date, timedelta
 
 # =========================================================
-# DESCARGA DE DATOS
+# CONFIGURACIÓN GENERAL
 # =========================================================
-def download_prices(ticker, start, end):
-    data = yf.download(ticker, start=start, end=end)
+st.set_page_config(
+    page_title="Modelos GBM - Heston - Merton",
+    layout="wide"
+)
 
+st.title("Simulación y Backtesting: GBM, Heston y Merton")
+st.markdown(
+    "Aplicación para descargar activos de Yahoo Finance, "
+    "simular tres modelos estocásticos y escoger el mejor por **RMSE**."
+)
+
+# =========================================================
+# FUNCIONES AUXILIARES
+# =========================================================
+@st.cache_data
+def download_prices(ticker: str, start: str, end: str) -> pd.Series | None:
+    """
+    Descarga precios de Yahoo Finance y devuelve la serie de 'Adj Close' (o similar).
+    """
+    data = yf.download(ticker, start=start, end=end)
     if data.empty:
         return None
 
     for col in ["Adj Close", "Close", "close", "adjclose"]:
         if col in data.columns:
-            return data[col].dropna().astype(float)
+            s = data[col].dropna()
+            if not s.empty:
+                return s.astype(float)
 
     return None
 
 
-# =========================================================
-# AUXILIARES
-# =========================================================
-def train_test_split(series, test_size=0.2):
+def compute_log_returns(prices: pd.Series) -> pd.Series:
+    return np.log(prices / prices.shift(1)).dropna()
+
+
+def train_test_split_series(series: pd.Series, test_size: float = 0.2):
     n = len(series)
     n_test = int(n * test_size)
+    if n_test < 5:
+        n_test = 5
+    if n_test >= n:
+        n_test = max(1, n - 1)
+
     train = series.iloc[:-n_test]
     test = series.iloc[-n_test:]
     return train, test
 
 
-def compute_rmse(y_true, y_pred):
+def compute_rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     y_true = np.array(y_true, dtype=float)
     y_pred = np.array(y_pred, dtype=float)
     return np.sqrt(np.mean((y_true - y_pred) ** 2))
 
 
 # =========================================================
-# MODELO 1: GBM (VOLATILIDAD DIARIA)
+# MODELO GBM
 # =========================================================
-def backtest_gbm(prices_train, prices_test, n_paths=1000, seed=42):
+def estimate_gbm_params(prices: pd.Series):
+    """
+    Estima mu y sigma anuales de un GBM a partir de retornos log diarios.
+    """
+    r = compute_log_returns(prices)
+    mu_daily = r.mean()
+    sigma_daily = r.std()
 
-    train_arr = prices_train.values.astype(float)
-    test_arr = prices_test.values.astype(float)
+    mu_annual = mu_daily * 252
+    sigma_annual = sigma_daily * np.sqrt(252)
 
-    # Log-retornos DIARIOS
-    log_ret = np.log(train_arr[1:] / train_arr[:-1])
-    mu = np.mean(log_ret)         # media diaria
-    sigma = np.std(log_ret)       # volatilidad diaria
-    dt = 1                        # un día
+    return mu_annual, sigma_annual
 
-    S0 = float(train_arr[-1])
-    n_steps = len(test_arr)
 
-    rng = np.random.default_rng(seed)
-    Z = rng.standard_normal((n_paths, n_steps))
+def simulate_gbm_paths(S0: float, mu: float, sigma: float,
+                       dt: float, n_steps: int, n_paths: int, seed: int = 42):
+    np.random.seed(seed)
+    S = np.zeros((n_steps + 1, n_paths))
+    S[0, :] = S0
 
-    S_paths = np.zeros((n_paths, n_steps))
-    S_paths[:, 0] = S0
+    mu_dt = (mu - 0.5 * sigma ** 2) * dt
+    sigma_sqrt_dt = sigma * np.sqrt(dt)
 
-    for t in range(1, n_steps):
-        S_paths[:, t] = (
-            S_paths[:, t-1] *
-            np.exp((mu - 0.5 * sigma**2) * dt +
-                   sigma * np.sqrt(dt) * Z[:, t])
-        )
+    for t in range(1, n_steps + 1):
+        z = np.random.normal(size=n_paths)
+        S[t, :] = S[t - 1, :] * np.exp(mu_dt + sigma_sqrt_dt * z)
 
-    preds = S_paths.mean(axis=0)
-
-    rmse_paths = np.sqrt(np.mean((S_paths - test_arr.reshape(1, -1))**2, axis=1))
-    best_idx = rmse_paths.argmin()
-    best_traj = S_paths[best_idx]
-
-    return {
-        "paths": S_paths,
-        "mean": preds,
-        "rmse_mean": compute_rmse(test_arr, preds),
-        "rmse_each": rmse_paths,
-        "best_traj": best_traj,
-        "params": {"mu_daily": mu, "sigma_daily": sigma}
-    }
+    return S
 
 
 # =========================================================
-# MODELO 2: HESTON (DIARIO)
+# MODELO MERTON (JUMP DIFFUSION)
 # =========================================================
-def backtest_heston(prices_train, prices_test,
-                    kappa=2.0, theta_factor=1.0, sigma_v=0.3, rho=-0.7,
-                    n_paths=1000, seed=123):
+def estimate_merton_params(prices: pd.Series,
+                           jump_threshold_sigma: float = 3.0):
+    """
+    Estimación muy simple para Merton:
+    - mu y sigma del componente continuo (como GBM)
+    - lambda, mu_J, sigma_J para saltos usando un umbral de sigma.
+    """
+    r = compute_log_returns(prices)
+    mu_daily = r.mean()
+    sigma_daily = r.std()
 
-    train_arr = prices_train.values.astype(float)
-    test_arr = prices_test.values.astype(float)
+    # Estimación de GBM
+    mu_annual = mu_daily * 252
+    sigma_annual = sigma_daily * np.sqrt(252)
 
-    # Parámetros diarios
-    log_ret = np.log(train_arr[1:] / train_arr[:-1])
-    mu = np.mean(log_ret)              # media diaria
-    sigma = np.std(log_ret)           # vol diaria
-    v0 = sigma**2                     # varianza diaria inicial
-    theta = theta_factor * v0         # nivel de largo plazo
-    dt = 1                            # paso 1 día
+    # Detección de saltos
+    z_scores = (r - mu_daily) / sigma_daily
+    jumps = r[np.abs(z_scores) > jump_threshold_sigma]
 
-    S0 = float(train_arr[-1])
-    n_steps = len(test_arr)
+    n_days = len(r)
+    years = n_days / 252
 
-    rng = np.random.default_rng(seed)
-    Z1 = rng.standard_normal((n_paths, n_steps))
-    Z2i = rng.standard_normal((n_paths, n_steps))
-    Z2 = rho * Z1 + np.sqrt(1 - rho**2) * Z2i
-
-    S_paths = np.zeros((n_paths, n_steps))
-    v_paths = np.zeros((n_paths, n_steps))
-
-    S_paths[:, 0] = S0
-    v_paths[:, 0] = max(v0, 1e-8)
-
-    for t in range(1, n_steps):
-        v_prev = np.maximum(v_paths[:, t-1], 1e-8)
-
-        # Full truncation Euler para mantener v_t >= 0
-        v_paths[:, t] = (
-            v_prev
-            + kappa * (theta - v_prev) * dt
-            + sigma_v * np.sqrt(v_prev * dt) * Z2[:, t]
-        )
-        v_paths[:, t] = np.maximum(v_paths[:, t], 1e-8)
-
-        S_paths[:, t] = (
-            S_paths[:, t-1] *
-            np.exp(
-                (mu - 0.5 * v_paths[:, t]) * dt +
-                np.sqrt(v_paths[:, t] * dt) * Z1[:, t]
-            )
-        )
-
-    preds = S_paths.mean(axis=0)
-
-    rmse_paths = np.sqrt(np.mean((S_paths - test_arr.reshape(1, -1))**2, axis=1))
-    best_idx = rmse_paths.argmin()
-
-    return {
-        "paths": S_paths,
-        "mean": preds,
-        "rmse_mean": compute_rmse(test_arr, preds),
-        "rmse_each": rmse_paths,
-        "best_traj": S_paths[best_idx],
-        "params": {
-            "mu_daily": mu,
-            "sigma_daily": sigma,
-            "v0_daily": v0,
-            "theta_daily": theta,
-            "kappa": kappa,
-            "sigma_v": sigma_v,
-            "rho": rho
-        }
-    }
-
-# =========================================================
-# MODELO 3: MERTON (DIARIO, λ ES POR AÑO)
-# =========================================================
-def backtest_merton(prices_train, prices_test,
-                    lam=2.0, mu_j=-0.02, sigma_j=0.05,
-                    n_paths=1000, seed=999):
-
-    train_arr = prices_train.values.astype(float)
-    test_arr = prices_test.values.astype(float)
-
-    # Parámetros diarios
-    log_ret = np.log(train_arr[1:] / train_arr[:-1])
-    mu = np.mean(log_ret)
-    sigma = np.std(log_ret)
-    dt = 1
-
-    # λ dado en saltos/año -> lo llevamos a saltos/día
-    lam_daily = lam / 252.0
-
-    S0 = float(train_arr[-1])
-    n_steps = len(test_arr)
-
-    rng = np.random.default_rng(seed)
-    Z = rng.standard_normal((n_paths, n_steps))
-    Np = rng.poisson(lam_daily * dt, size=(n_paths, n_steps))
-    J = rng.normal(mu_j, sigma_j, size=(n_paths, n_steps))
-
-    S_paths = np.zeros((n_paths, n_steps))
-    S_paths[:, 0] = S0
-
-    for t in range(1, n_steps):
-        jumps = Np[:, t] * J[:, t]          # tamaño total del salto en log-precio
-
-        S_paths[:, t] = (
-            S_paths[:, t-1] *
-            np.exp(
-                (mu - 0.5 * sigma**2) * dt +
-                sigma * np.sqrt(dt) * Z[:, t] +
-                jumps
-            )
-        )
-
-    preds = S_paths.mean(axis=0)
-
-    rmse_paths = np.sqrt(np.mean((S_paths - test_arr.reshape(1, -1))**2, axis=1))
-    best_idx = rmse_paths.argmin()
-
-    return {
-        "paths": S_paths,
-        "mean": preds,
-        "rmse_mean": compute_rmse(test_arr, preds),
-        "rmse_each": rmse_paths,
-        "best_traj": S_paths[best_idx],
-        "params": {
-            "mu_daily": mu,
-            "sigma_daily": sigma,
-            "lambda_year": lam,
-            "lambda_daily": lam_daily,
-            "mu_j": mu_j,
-            "sigma_j": sigma_j
-        }
-    }
-
-
-
-# =========================================================
-# INTERFAZ STREAMLIT
-# =========================================================
-st.set_page_config(page_title="App de Pronóstico DeFi 2", layout="wide")
-st.title("App de pronóstico DeFi 2: GBM, Heston y Merton")
-
-col1, col2 = st.columns(2)
-with col1:
-    ticker = st.text_input("Ticker de Yahoo Finance", value="AAPL")
-with col2:
-    years = st.slider("Años de historia a usar", 1, 10, 5)
-
-end_date = date.today()
-start_date = end_date - timedelta(days=365 * years)
-
-st.write(f"Rango de fechas: {start_date} → {end_date}")
-
-test_size = st.slider("Proporción para test", 0.10, 0.50, 0.20)
-
-# Sidebar
-st.sidebar.header("Parámetros de modelos")
-
-st.sidebar.subheader("Heston")
-kappa = st.sidebar.slider("kappa", 0.1, 5.0, 2.0)
-theta_factor = st.sidebar.slider("θ factor", 0.5, 2.0, 1.0)
-sigma_v = st.sidebar.slider("σ_v", 0.1, 1.5, 0.5)
-rho = st.sidebar.slider("ρ", -0.99, 0.0, -0.7)
-
-st.sidebar.subheader("Merton")
-lam = st.sidebar.slider("λ saltos/año", 0.1, 5.0, 2.0)
-mu_j = st.sidebar.slider("μ_j salto medio", -0.1, 0.1, -0.02)
-sigma_j = st.sidebar.slider("σ_j volatilidad del salto", 0.01, 0.3, 0.05)
-
-n_paths = st.sidebar.slider("Trayectorias", 200, 3000, 1000, step=100)
-
-# =========================================================
-# EJECUCIÓN
-# =========================================================
-if st.button("Ejecutar pronósticos y backtesting"):
-
-    prices = download_prices(ticker, start_date, end_date)
-
-    if prices is None or len(prices) < 50:
-        st.error("No se pudieron descargar datos suficientes.")
+    if len(jumps) > 0 and years > 0:
+        lam = len(jumps) / years  # intensidad anual
+        mu_J = jumps.mean()       # tamaño medio del salto (en retornos diarios)
+        sigma_J = jumps.std() if len(jumps) > 1 else 0.01
     else:
-        st.subheader("Serie histórica")
-        st.line_chart(prices)
+        # Si no detecta saltos, ponemos valores pequeños
+        lam = 0.1
+        mu_J = 0.0
+        sigma_J = 0.01
 
-        train, test = train_test_split(prices, test_size=test_size)
-        st.write(f"Observaciones: {len(prices)} | Train: {len(train)} | Test: {len(test)}")
+    return mu_annual, sigma_annual, lam, mu_J, sigma_J
 
-        # Ejecutar modelos
-        gbm = backtest_gbm(train, test, n_paths=n_paths)
-        heston = backtest_heston(train, test, kappa, theta_factor, sigma_v, rho, n_paths=n_paths)
-        merton = backtest_merton(train, test, lam, mu_j, sigma_j, n_paths=n_paths)
 
-        gbm_preds = np.array(gbm["mean"]).flatten()
-        heston_preds = np.array(heston["mean"]).flatten()
-        merton_preds = np.array(merton["mean"]).flatten()
+def simulate_merton_paths(S0: float,
+                          mu: float,
+                          sigma: float,
+                          lam: float,
+                          mu_J: float,
+                          sigma_J: float,
+                          dt: float,
+                          n_steps: int,
+                          n_paths: int,
+                          seed: int = 123):
+    np.random.seed(seed)
+    S = np.zeros((n_steps + 1, n_paths))
+    S[0, :] = S0
 
-        test_arr = np.array(test.values, dtype=float).flatten()
+    # Drif corregido por componente de saltos
+    drift = (mu - 0.5 * sigma ** 2 - lam * mu_J) * dt
+    diff_coeff = sigma * np.sqrt(dt)
 
-        # Tabla de RMSE
-        rmse_df = pd.DataFrame({
-            "Modelo": ["GBM", "Heston", "Merton"],
-            "RMSE": [gbm["rmse_mean"], heston["rmse_mean"], merton["rmse_mean"]]
-        }).set_index("Modelo")
+    for t in range(1, n_steps + 1):
+        # Difusión
+        z = np.random.normal(size=n_paths)
+        dW = diff_coeff * z
 
-        st.subheader("Resultados de Backtesting (RMSE)")
-        st.table(rmse_df.style.format({"RMSE": "{:.4f}"}))
+        # Saltos (Poisson)
+        N = np.random.poisson(lam * dt, size=n_paths)
+        J = np.zeros(n_paths)
+        # Si hay saltos, sumamos Normal(mu_J, sigma_J) N veces
+        mask_jumps = N > 0
+        if np.any(mask_jumps):
+            # Para cada camino con N>0, suma de N Normales ~ Normal(N*mu_J, sqrt(N)*sigma_J)
+            Nj = N[mask_jumps]
+            J[mask_jumps] = np.random.normal(
+                loc=Nj * mu_J,
+                scale=np.sqrt(Nj) * sigma_J
+            )
 
-        best_model = rmse_df["RMSE"].idxmin()
-        st.success(f"Mejor modelo según RMSE: {best_model}")
+        log_factor = drift + dW + J
+        S[t, :] = S[t - 1, :] * np.exp(log_factor)
 
-        # Gráfico comparativo
-        st.subheader("Predicciones vs Real")
-        comp_df = pd.DataFrame({
-            "Real": test_arr,
-            "GBM": gbm_preds,
-            "Heston": heston_preds,
-            "Merton": merton_preds
-        }, index=test.index)
+    return S
 
-        st.line_chart(comp_df)
 
-        # Parámetros
-        st.subheader("Parámetros estimados")
-        st.write("GBM:", gbm["params"])
-        st.write("Heston:", heston["params"])
-        st.write("Merton:", merton["params"])
+# =========================================================
+# MODELO HESTON
+# =========================================================
+def estimate_heston_params(prices: pd.Series):
+    """
+    Estimación muy simplificada para Heston:
+    - mu anual: como GBM
+    - v0, theta: varianza media
+    - kappa, xi, rho: parámetros fijos razonables
+    Esta parte se puede sofisticar más si lo necesitas.
+    """
+    r = compute_log_returns(prices)
+    mu_daily = r.mean()
+    sigma_daily = r.std()
+
+    mu_annual = mu_daily * 252
+
+    var_daily = sigma_daily ** 2
+    v0 = var_daily
+    theta = var_daily  # varianza de largo plazo ~ varianza histórica
+
+    # Parámetros "típicos"
+    kappa = 1.5   # velocidad de reversión
+    xi = 0.5      # vol-of-vol
+    rho = -0.7    # correlación negativa
+
+    return mu_annual, v0, kappa, theta, xi, rho
+
+
+def simulate_heston_paths(S0: float,
+                          mu: float,
+                          v0: float,
+                          kappa: float,
+                          theta: float,
+                          xi: float,
+                          rho: float,
+                          dt: float,
+                          n_steps: int,
+                          n_paths: int,
+                          seed: int = 999):
+    np.random.seed(seed)
+    S = np.zeros((n_steps + 1, n_paths))
+    v = np.zeros((n_steps + 1, n_paths))
+
+    S[0, :] = S0
+    v[0, :] = v0
+
+    for t in range(1, n_steps + 1):
+        z1 = np.random.normal(size=n_paths)
+        z2 = np.random.normal(size=n_paths)
+
+        # Brownianos correlacionados
+        dW_v = np.sqrt(dt) * z2
+        dW_s = np.sqrt(dt) * (rho * z2 + np.sqrt(1 - rho ** 2) * z1)
+
+        # Full truncation para varianza
+        v_prev = np.clip(v[t - 1, :], 1e-8, None)
+
+        dv = kappa * (theta - v_prev) * dt + xi * np.sqrt(v_prev) * dW_v
+        v_t = v_prev + dv
+        v_t = np.clip(v_t, 1e-8, None)
+
+        dS = (mu - 0.5 * v_prev) * dt + np.sqrt(v_prev) * dW_s
+        S[t, :] = S[t - 1, :] * np.exp(dS)
+        v[t, :] = v_t
+
+    return S, v
+
+
+# =========================================================
+# GRÁFICO DE ABANICO
+# =========================================================
+def make_fan_chart(test_index, S_paths, real_prices, title: str):
+    """
+    Genera una figura de abanico (percentiles) y serie real.
+    S_paths: matriz (n_steps+1, n_paths) -> ignoramos t=0 para backtest.
+    """
+    n_steps = S_paths.shape[0] - 1
+
+    # Percentiles al nivel de cada tiempo
+    percentiles = np.percentile(S_paths[1:, :], [5, 25, 50, 75, 95], axis=1)
+    p5, p25, p50, p75, p95 = percentiles
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    # Abanico
+    ax.fill_between(test_index, p5, p95, alpha=0.2, label="5%-95%")
+    ax.fill_between(test_index, p25, p75, alpha=0.4, label="25%-75%")
+    ax.plot(test_index, p50, label="Mediana simulada", linewidth=2)
+
+    # Serie real
+    ax.plot(test_index, real_prices.values, label="Precio real", linewidth=2)
+
+    ax.set_title(title)
+    ax.set_xlabel("Fecha")
+    ax.set_ylabel("Precio")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    return fig
+
+
+# =========================================================
+# INTERFAZ DE LA APP
+# =========================================================
+# Sidebar: parámetros de usuario
+st.sidebar.header("Parámetros de simulación")
+
+default_end = date.today()
+default_start = default_end - timedelta(days=5 * 365)
+
+ticker = st.sidebar.text_input("Ticker (Yahoo Finance)", value="AAPL")
+start_date = st.sidebar.date_input("Fecha inicio", value=default_start)
+end_date = st.sidebar.date_input("Fecha fin", value=default_end)
+
+test_size = st.sidebar.slider("Proporción de datos para test (backtest)",
+                              min_value=0.1, max_value=0.4, value=0.2, step=0.05)
+
+n_paths = st.sidebar.slider("Número de trayectorias simuladas",
+                            min_value=200, max_value=2000, value=500, step=100)
+
+st.sidebar.markdown("dt = 1/252 (supuesto de datos diarios)")
+
+if st.sidebar.button("Ejecutar modelos"):
+    if start_date >= end_date:
+        st.error("La fecha de inicio debe ser anterior a la fecha de fin.")
+        st.stop()
+
+    prices = download_prices(
+        ticker=ticker,
+        start=str(start_date),
+        end=str(end_date)
+    )
+
+    if prices is None or len(prices) < 260:
+        st.error("No se pudo descargar el activo o hay muy pocos datos (mínimo ~260 días).")
+        st.stop()
+
+    st.subheader(f"Serie de precios: {ticker}")
+    st.line_chart(prices)
+
+    train_prices, test_prices = train_test_split_series(prices, test_size=test_size)
+    st.write(f"Datos de entrenamiento: {train_prices.index[0].date()} – {train_prices.index[-1].date()}")
+    st.write(f"Datos de prueba (backtest): {test_prices.index[0].date()} – {test_prices.index[-1].date()}")
+    st.write(f"Número de observaciones (train/test): {len(train_prices)} / {len(test_prices)}")
+
+    S0 = train_prices.iloc[-1]
+    n_steps = len(test_prices)
+    dt = 1 / 252
+
+    results = {}
+
+    # -----------------------------------------------------
+    # GBM
+    # -----------------------------------------------------
+    try:
+        mu_gbm, sigma_gbm = estimate_gbm_params(train_prices)
+        S_gbm = simulate_gbm_paths(
+            S0=S0,
+            mu=mu_gbm,
+            sigma=sigma_gbm,
+            dt=dt,
+            n_steps=n_steps,
+            n_paths=n_paths,
+            seed=1
+        )
+        gbm_mean = S_gbm[1:, :].mean(axis=1)
+        rmse_gbm = compute_rmse(test_prices.values, gbm_mean)
+
+        fig_gbm = make_fan_chart(
+            test_index=test_prices.index,
+            S_paths=S_gbm,
+            real_prices=test_prices,
+            title=f"Abanico GBM - {ticker}"
+        )
+
+        results["GBM"] = {
+            "rmse": rmse_gbm,
+            "fig": fig_gbm
+        }
+    except Exception as e:
+        st.error(f"Error en el modelo GBM: {e}")
+
+    # -----------------------------------------------------
+    # MERTON
+    # -----------------------------------------------------
+    try:
+        mu_mer, sigma_mer, lam_mer, mu_J_mer, sigma_J_mer = estimate_merton_params(train_prices)
+        S_mer = simulate_merton_paths(
+            S0=S0,
+            mu=mu_mer,
+            sigma=sigma_mer,
+            lam=lam_mer,
+            mu_J=mu_J_mer,
+            sigma_J=sigma_J_mer,
+            dt=dt,
+            n_steps=n_steps,
+            n_paths=n_paths,
+            seed=2
+        )
+        mer_mean = S_mer[1:, :].mean(axis=1)
+        rmse_mer = compute_rmse(test_prices.values, mer_mean)
+
+        fig_mer = make_fan_chart(
+            test_index=test_prices.index,
+            S_paths=S_mer,
+            real_prices=test_prices,
+            title=f"Abanico Merton - {ticker}"
+        )
+
+        results["Merton"] = {
+            "rmse": rmse_mer,
+            "fig": fig_mer
+        }
+    except Exception as e:
+        st.error(f"Error en el modelo Merton: {e}")
+
+    # -----------------------------------------------------
+    # HESTON
+    # -----------------------------------------------------
+    try:
+        mu_h, v0_h, kappa_h, theta_h, xi_h, rho_h = estimate_heston_params(train_prices)
+        S_h, v_h = simulate_heston_paths(
+            S0=S0,
+            mu=mu_h,
+            v0=v0_h,
+            kappa=kappa_h,
+            theta=theta_h,
+            xi=xi_h,
+            rho=rho_h,
+            dt=dt,
+            n_steps=n_steps,
+            n_paths=n_paths,
+            seed=3
+        )
+        h_mean = S_h[1:, :].mean(axis=1)
+        rmse_h = compute_rmse(test_prices.values, h_mean)
+
+        fig_h = make_fan_chart(
+            test_index=test_prices.index,
+            S_paths=S_h,
+            real_prices=test_prices,
+            title=f"Abanico Heston - {ticker}"
+        )
+
+        results["Heston"] = {
+            "rmse": rmse_h,
+            "fig": fig_h
+        }
+    except Exception as e:
+        st.error(f"Error en el modelo Heston: {e}")
+
+    # =====================================================
+    # MOSTRAR RESULTADOS
+    # =====================================================
+    if not results:
+        st.error("Ningún modelo pudo ejecutarse.")
+        st.stop()
+
+    st.subheader("RMSE de cada modelo (backtest)")
+    rmse_table = pd.DataFrame(
+        {name: {"RMSE": info["rmse"]} for name, info in results.items()}
+    ).T.sort_values("RMSE")
+    st.table(rmse_table.style.format({"RMSE": "{:.4f}"}))
+
+    best_model = rmse_table.index[0]
+    st.success(f"Mejor modelo según RMSE: **{best_model}**")
+
+    # Gráficos de abanico
+    st.subheader("Abanicos de simulación vs. precios reales")
+
+    cols = st.columns(len(results))
+    for col, (name, info) in zip(cols, results.items()):
+        with col:
+            st.markdown(f"#### {name}")
+            st.pyplot(info["fig"])
+
+else:
+    st.info("Configura los parámetros en el sidebar y pulsa **'Ejecutar modelos'**.")
+
+

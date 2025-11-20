@@ -3,7 +3,7 @@ import yfinance as yf
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_squared_error
-import plotly.express as px # Importamos Plotly para gráficos avanzados
+import plotly.express as px # Importamos Plotly para gráficos avanzados y profesionales
 
 # --- Configuración de la Aplicación Streamlit ---
 # Mejoramos el título y el layout
@@ -324,9 +324,9 @@ def main():
             
             # Definición de colores para las series
             color_map = {
-                'Precio Real': 'white', # Precio real, más destacado
+                'Precio Real': '#FFFFFF', # Blanco (Real/Histórico)
                 'GBM': '#3366ff',    # Azul
-                'Heston': '#ff9900',  # Naranja/Amarillo
+                'Heston': '#ff9900',  # Naranja
                 'Merton': '#cc00cc'   # Púrpura
             }
             

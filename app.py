@@ -65,7 +65,6 @@ def compute_rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 def estimate_gbm_params(prices: pd.Series):
     """
     Estima mu y sigma anuales para un GBM a partir de retornos log.
-    Se asegura de trabajar siempre con numpy (no con Series).
     """
     r_series = compute_log_returns(prices)
     r = r_series.values.astype(float)
@@ -107,7 +106,6 @@ def estimate_merton_params(prices: pd.Series,
                            jump_threshold_sigma: float = 3.0):
     """
     Estima parámetros básicos para Merton.
-    Todo se hace en numpy para evitar ambigüedad de Series.
     """
     r_series = compute_log_returns(prices)
     r = r_series.values.astype(float)
@@ -186,7 +184,6 @@ def simulate_merton_paths(S0: float,
 def estimate_heston_params(prices: pd.Series):
     """
     Estimación simplificada de parámetros Heston.
-    Todo en numpy para evitar problemas.
     """
     r_series = compute_log_returns(prices)
     r = r_series.values.astype(float)
@@ -286,37 +283,45 @@ end_date = st.sidebar.date_input("Fecha fin", value=default_end)
 test_size = st.sidebar.slider("Proporción de datos para test (backtest)",
                               min_value=0.1, max_value=0.4, value=0.2, step=0.05)
 
-n_paths = st.sidebar.slider("Número de trayectorias simuladas",
+n_paths = st.sidebar.slider("Número de trayectorias simuladas (todos los modelos)",
                             min_value=200, max_value=2000, value=500, step=100)
 
 st.sidebar.markdown("dt = 1/252 (supuesto de datos diarios)")
 
-# Parámetros manuales
-with st.sidebar.expander("Parámetros GBM (opcionales)", expanded=False):
+# ----- GBM -----
+with st.sidebar.expander("Parámetros GBM (manuales)", expanded=False):
     use_manual_gbm = st.checkbox("Usar parámetros manuales GBM", value=False)
-    mu_gbm_manual = st.number_input("mu anual GBM", value=0.10, format="%.5f")
-    sigma_gbm_manual = st.number_input("sigma anual GBM", value=0.20,
+    mu_gbm_manual = st.number_input("μ (mu) anual GBM", value=0.10, format="%.5f")
+    sigma_gbm_manual = st.number_input("σ (sigma) anual GBM", value=0.20,
                                        min_value=0.0001, format="%.5f")
+    S0_gbm_manual = st.number_input("S₀ (precio inicial GBM)", value=100.0,
+                                    min_value=0.0001, format="%.4f")
 
-with st.sidebar.expander("Parámetros Merton (opcionales)", expanded=False):
+# ----- MERTON -----
+with st.sidebar.expander("Parámetros Merton (manuales)", expanded=False):
     use_manual_merton = st.checkbox("Usar parámetros manuales Merton", value=False)
-    lam_manual = st.number_input("lambda (intensidad saltos)", value=0.10,
+    mu_mer_manual = st.number_input("μ (mu) anual Merton", value=0.10, format="%.5f")
+    sigma_mer_manual = st.number_input("σ (sigma) anual Merton", value=0.20,
+                                       min_value=0.0001, format="%.5f")
+    lam_manual = st.number_input("λ (lambda, frecuencia de saltos)", value=0.10,
                                  min_value=0.0, format="%.5f")
-    mu_J_manual = st.number_input("mu_J (tamaño medio salto)", value=0.00, format="%.5f")
-    sigma_J_manual = st.number_input("sigma_J (vol salto)", value=0.05,
+    mu_J_manual = st.number_input("μⱼ (tamaño medio salto)", value=0.00, format="%.5f")
+    sigma_J_manual = st.number_input("σⱼ (volatilidad del salto)", value=0.05,
                                      min_value=0.0001, format="%.5f")
 
-with st.sidebar.expander("Parámetros Heston (opcionales)", expanded=False):
+# ----- HESTON -----
+with st.sidebar.expander("Parámetros Heston (manuales)", expanded=False):
     use_manual_heston = st.checkbox("Usar parámetros manuales Heston", value=False)
-    v0_manual = st.number_input("v0 (var inicial)", value=0.04,
+    mu_h_manual = st.number_input("μ (mu) anual Heston", value=0.10, format="%.5f")
+    v0_manual = st.number_input("v₀ (varianza inicial)", value=0.04,
                                 min_value=0.000001, format="%.6f")
-    kappa_manual = st.number_input("kappa (vel. reversión)", value=1.50,
+    kappa_manual = st.number_input("κ (kappa, vel. reversión)", value=1.50,
                                    min_value=0.0001, format="%.5f")
-    theta_manual = st.number_input("theta (var largo plazo)", value=0.04,
+    theta_manual = st.number_input("θ (theta, var. largo plazo)", value=0.04,
                                    min_value=0.000001, format="%.6f")
-    xi_manual = st.number_input("xi (volatilidad de la volatilidad σᵥ)", value=0.50,
+    xi_manual = st.number_input("σᵥ (sigma_v, vol. de la vol)", value=0.50,
                                 min_value=0.0001, format="%.5f")
-    rho_manual = st.number_input("rho (correlación)", value=-0.70,
+    rho_manual = st.number_input("ρ (rho, correlación)", value=-0.70,
                                  min_value=-0.99, max_value=0.99, format="%.3f")
 
 # =========================================================
@@ -349,7 +354,10 @@ if st.sidebar.button("Ejecutar modelos"):
     st.write(f"Datos de prueba (backtest): {test_prices.index[0].date()} – {test_prices.index[-1].date()}")
     st.write(f"Número de observaciones (train/test): {len(train_prices)} / {len(test_prices)}")
 
-    S0 = train_prices.iloc[-1]
+    # S0 histórico (último precio de entrenamiento)
+    S0_hist = float(train_prices.iloc[-1])
+    S0 = S0_hist  # base para Merton y Heston
+
     n_steps = len(test_prices)
     dt = 1 / 252
 
@@ -362,12 +370,16 @@ if st.sidebar.button("Ejecutar modelos"):
         mu_gbm_est, sigma_gbm_est = estimate_gbm_params(train_prices)
         mu_gbm = mu_gbm_manual if use_manual_gbm else mu_gbm_est
         sigma_gbm = sigma_gbm_manual if use_manual_gbm else sigma_gbm_est
+        S0_gbm = S0_gbm_manual if use_manual_gbm else S0_hist
 
-        st.write(f"GBM - mu estimado: {mu_gbm_est:.4f}, sigma estimado: {sigma_gbm_est:.4f} "
-                 f"{'(usando valores manuales)' if use_manual_gbm else ''}")
+        st.write(
+            f"GBM - μ estimado: {mu_gbm_est:.4f}, σ estimado: {sigma_gbm_est:.4f}, "
+            f"S₀ histórico: {S0_hist:.4f} "
+            f"{'(usando parámetros manuales)' if use_manual_gbm else ''}"
+        )
 
         S_gbm = simulate_gbm_paths(
-            S0=S0,
+            S0=S0_gbm,
             mu=mu_gbm,
             sigma=sigma_gbm,
             dt=dt,
@@ -393,20 +405,23 @@ if st.sidebar.button("Ejecutar modelos"):
     # -----------------------------------------------------
     try:
         mu_mer_est, sigma_mer_est, lam_est, mu_J_est, sigma_J_est = estimate_merton_params(train_prices)
+
+        mu_mer = mu_mer_manual if use_manual_merton else mu_mer_est
+        sigma_mer = sigma_mer_manual if use_manual_merton else sigma_mer_est
         lam_mer = lam_manual if use_manual_merton else lam_est
         mu_J_mer = mu_J_manual if use_manual_merton else mu_J_est
         sigma_J_mer = sigma_J_manual if use_manual_merton else sigma_J_est
 
         st.write(
-            f"Merton - mu estimado: {mu_mer_est:.4f}, sigma estimado: {sigma_mer_est:.4f}, "
-            f"lambda estimado: {lam_est:.4f}, mu_J estimado: {mu_J_est:.4f}, sigma_J estimado: {sigma_J_est:.4f} "
-            f"{'(usando valores manuales)' if use_manual_merton else ''}"
+            f"Merton - μ estimado: {mu_mer_est:.4f}, σ estimado: {sigma_mer_est:.4f}, "
+            f"λ estimado: {lam_est:.4f}, μⱼ estimado: {mu_J_est:.4f}, σⱼ estimado: {sigma_J_est:.4f} "
+            f"{'(usando parámetros manuales)' if use_manual_merton else ''}"
         )
 
         S_mer = simulate_merton_paths(
             S0=S0,
-            mu=mu_mer_est,
-            sigma=sigma_mer_est,
+            mu=mu_mer,
+            sigma=sigma_mer,
             lam=lam_mer,
             mu_J=mu_J_mer,
             sigma_J=sigma_J_mer,
@@ -433,6 +448,8 @@ if st.sidebar.button("Ejecutar modelos"):
     # -----------------------------------------------------
     try:
         mu_h_est, v0_est, kappa_est, theta_est, xi_est, rho_est = estimate_heston_params(train_prices)
+
+        mu_h = mu_h_manual if use_manual_heston else mu_h_est
         v0_h = v0_manual if use_manual_heston else v0_est
         kappa_h = kappa_manual if use_manual_heston else kappa_est
         theta_h = theta_manual if use_manual_heston else theta_est
@@ -440,15 +457,15 @@ if st.sidebar.button("Ejecutar modelos"):
         rho_h = rho_manual if use_manual_heston else rho_est
 
         st.write(
-            f"Heston - mu estimado: {mu_h_est:.4f}, v0 estimado: {v0_est:.6f}, "
-            f"kappa estimado: {kappa_est:.4f}, theta estimado: {theta_est:.6f}, "
-            f"xi (σᵥ) estimado: {xi_est:.4f}, rho estimado: {rho_est:.3f} "
-            f"{'(usando valores manuales)' if use_manual_heston else ''}"
+            f"Heston - μ estimado: {mu_h_est:.4f}, v₀ estimado: {v0_est:.6f}, "
+            f"κ estimado: {kappa_est:.4f}, θ estimado: {theta_est:.6f}, "
+            f"σᵥ estimado: {xi_est:.4f}, ρ estimado: {rho_est:.3f} "
+            f"{'(usando parámetros manuales)' if use_manual_heston else ''}"
         )
 
         S_h, v_h = simulate_heston_paths(
             S0=S0,
-            mu=mu_h_est,
+            mu=mu_h,
             v0=v0_h,
             kappa=kappa_h,
             theta=theta_h,
@@ -494,147 +511,5 @@ if st.sidebar.button("Ejecutar modelos"):
         with col:
             st.markdown(f"#### {name}")
             st.pyplot(info["fig"])
-
-    # =====================================================
-    # GUÍA DE PARÁMETROS (EXPLICACIÓN TEÓRICA)
-    # =====================================================
-    st.subheader("Guía de parámetros de los modelos")
-
-    tab_resumen, tab_gbm, tab_heston, tab_merton = st.tabs(
-        ["Resumen visual", "GBM", "Heston", "Merton"]
-    )
-
-    with tab_gbm:
-        st.markdown(
-            """
-### 1. Modelo GBM (Geometric Brownian Motion)
-
-**Parámetros fundamentales**
-
-| Parámetro | Significado              | Impacto                                                      |
-|----------:|-------------------------|--------------------------------------------------------------|
-| μ (mu)    | Retorno promedio diario | Desplaza la tendencia (al alza o a la baja).                |
-| σ (sigma) | Volatilidad diaria      | Qué tan “ancho” o variable es el movimiento del precio.     |
-| S₀        | Precio inicial          | Punto de partida de las simulaciones.                       |
-| n_paths   | Número de simulaciones  | Mientras más grande, más estable la predicción promedio.    |
-
-**¿Qué controla cada uno?**
-
-- **μ** controla la **pendiente** de las trayectorias.  
-  Mayor μ → tendencia más marcada hacia arriba (y viceversa).
-- **σ** controla la **anchura de la nube** de trayectorias.  
-  Mayor σ → simulaciones más dispersas, más riesgo.
-- **n_paths** afecta la **suavidad de la media** de predicción.  
-  Más trayectorias → la media simulada es más estable.
-
-**En esta app**
-
-- μ y σ se **estiman automáticamente** a partir del histórico.  
-- El usuario solo puede:
-  - Ajustar **n_paths** (número de trayectorias).
-  - Opcionalmente fijar μ y σ manuales en el sidebar.
-            """
-        )
-
-    with tab_heston:
-        st.markdown(
-            """
-### 2. Modelo de Heston (volatilidad estocástica)
-
-Este modelo introduce una segunda ecuación para la volatilidad, haciendo que la varianza también evolucione en el tiempo.
-
-**Parámetros fundamentales**
-
-| Parámetro | Significado                          | Impacto                                                              |
-|----------:|--------------------------------------|----------------------------------------------------------------------|
-| κ (kappa) | Velocidad de reversión               | Qué tan rápido la volatilidad vuelve a su promedio.                 |
-| θ (theta) | Nivel de largo plazo de volatilidad  | Volatilidad hacia la que tiende el modelo a largo plazo.           |
-| σᵥ (xi)   | Volatilidad de la volatilidad        | Cuánto varía la varianza en sí misma (vol-of-vol).                  |
-| ρ (rho)   | Correlación precio–volatilidad       | Relación entre movimientos de precio y cambios de volatilidad.      |
-| v₀        | Varianza inicial                     | Varianza desde donde arranca el proceso.                            |
-| μ         | Retorno promedio diario              | Misma interpretación que en GBM.                                   |
-| n_paths   | Número de simulaciones               | Suavidad de la media simulada.                                      |
-
-**Interpretación rápida**
-
-- κ grande → volatilidad **regresiva**: se mueve pero vuelve rápido al promedio.  
-- θ grande → mercado estructuralmente **más volátil** (más incertidumbre).  
-- σᵥ grande → volatilidad muy **inestable** (“Heston salvaje”), con picos fuertes.  
-- ρ negativo (por ejemplo -0.7) → **efecto apalancamiento**:  
-  cuando el precio cae, la volatilidad tiende a subir.
-
-En mercados reales de acciones, ρ suele ser **negativo**.
-
-**En esta app**
-
-El usuario puede modificar en el sidebar:
-
-- **kappa_manual (κ)**  
-- **theta_manual (θ)**  
-- **xi_manual (σᵥ)**  
-- **rho_manual (ρ)**  
-- (y también v0_manual si lo desea).
-
-Por defecto, estos parámetros se estiman a partir del histórico y se usan valores típicos cuando no hay suficiente información.
-            """
-        )
-
-    with tab_merton:
-        st.markdown(
-            """
-### 3. Modelo de Merton (Jump–Diffusion)
-
-Añade **saltos repentinos** al precio (crashes o spikes), superpuestos al movimiento continuo tipo GBM.
-
-**Parámetros fundamentales**
-
-| Parámetro | Significado                         | Impacto                                                   |
-|----------:|-------------------------------------|-----------------------------------------------------------|
-| λ (lambda)| Frecuencia de saltos por año        | Cuántos saltos ocurren por año en promedio.              |
-| μⱼ (mu_j) | Tamaño medio del salto              | Si es negativo → saltos bajistas (crashes).              |
-| σⱼ        | Volatilidad del salto               | Variabilidad en el tamaño de los saltos.                 |
-| μ         | Retorno “normal” (componente difusa)| Tendencia general del activo.                            |
-| σ         | Volatilidad “normal”                | Ruido continuo tipo GBM.                                 |
-| n_paths   | Número de trayectorias              | Suavidad de la media de predicción.                      |
-
-**Interpretación**
-
-- λ grande → muchos saltos por año.  
-- μⱼ < 0 → saltos típicamente **bajistas**.  
-- σⱼ grande → saltos muy **impredecibles** (cola muy pesada).
-
-Este modelo es adecuado cuando:
-
-- Hay caídas rápidas.  
-- Hay noticias fuertes o eventos discretos.  
-- Se observan **gaps** importantes entre un día y el siguiente.
-
-**En esta app**
-
-El usuario puede ajustar en el sidebar:
-
-- **lam_manual (λ)**  
-- **mu_J_manual (μⱼ)**  
-- **sigma_J_manual (σⱼ)**  
-
-μ y σ del componente continuo se estiman automáticamente del histórico, igual que en GBM.
-            """
-        )
-
-    with tab_resumen:
-        st.markdown(
-            """
-### Resumen visual – ¿qué parámetros importan por modelo?
-
-| Modelo  | Parámetros internos principales                     | Parámetros que puede manipular el usuario en esta app |
-|---------|------------------------------------------------------|-------------------------------------------------------|
-| **GBM** | μ, σ, S₀                                             | n_paths, (opcional) μ y σ                             |
-| **Heston** | μ, v₀, θ, κ, σᵥ (xi), ρ                          | κ, θ, σᵥ (xi), ρ, v₀                                  |
-| **Merton** | μ, σ, λ, μⱼ, σⱼ                                  | λ, μⱼ, σⱼ                                           |
-
-La idea es que la app sirva tanto para **simular y comparar modelos** como para **entender el papel de cada parámetro** en la forma del abanico y en el RMSE.
-            """
-        )
-
 else:
     st.info("Configura los parámetros en el sidebar y pulsa **'Ejecutar modelos'**.")

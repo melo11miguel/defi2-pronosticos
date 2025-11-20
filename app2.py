@@ -17,7 +17,7 @@ def estimate_gbm_parameters(log_returns):
 
 def simulate_gbm(S0, mu, sigma, T, N_paths, N_steps):
     """Simulación de Movimiento Browniano Geométrico."""
-    # Corrección: Aseguramos que los parámetros de entrada sean escalares (float)
+    # Corrección de seguridad: Aseguramos que los parámetros de entrada sean escalares (float)
     S0 = float(S0)
     mu = float(mu)
     sigma = float(sigma)
@@ -29,7 +29,7 @@ def simulate_gbm(S0, mu, sigma, T, N_paths, N_steps):
     for t in range(1, N_steps + 1):
         # Generar movimientos brownianos
         dW = np.random.normal(0, np.sqrt(dt), N_paths)
-        # La operación es ahora puramente NumPy, evitando el ValueError
+        # La operación es puramente NumPy
         paths[t] = paths[t-1] * np.exp((mu - 0.5 * sigma**2) * dt + sigma * dW)
         
     return paths
@@ -102,20 +102,18 @@ def backtest_model(df_prices, model_func, model_name, N_paths, T_test_days, **pa
     train_prices = df_prices.iloc[:-T_test_days]
     test_prices = df_prices.iloc[-T_test_days:]
     
-    # CORRECCIÓN: Convertir S0 a un flotante puro (escalar) para evitar el ValueError
-    S0 = float(train_prices.iloc[-1]) # Precio inicial para la simulación
+    # Convertir S0 a un flotante puro (escalar)
+    S0 = float(train_prices.iloc[-1])
     
     N_steps = T_test_days
     T = T_test_days / 252.0  # Asumimos 252 días de trading al año
     
     # 2. Simular el modelo
     if model_name == "GBM":
-        # GBM solo usa mu y sigma
         log_returns = np.log(train_prices / train_prices.shift(1)).dropna()
         mu, sigma = estimate_gbm_parameters(log_returns)
         simulated_paths = model_func(S0, mu, sigma, T, N_paths, N_steps)
     elif model_name == "Heston":
-        # Heston usa mu, V0, kappa, theta, sigma_v, rho
         log_returns = np.log(train_prices / train_prices.shift(1)).dropna()
         mu, sigma = estimate_gbm_parameters(log_returns) 
         
@@ -124,8 +122,8 @@ def backtest_model(df_prices, model_func, model_name, N_paths, T_test_days, **pa
         
         simulated_paths = model_func(
             S0=S0, 
-            mu=mu_annualized, # Anualizar mu
-            V0=v0_initial, # Volatilidad inicial V0 (varianza anualizada)
+            mu=mu_annualized,
+            V0=v0_initial,
             T=T, 
             N_paths=N_paths, 
             N_steps=N_steps,
@@ -135,7 +133,6 @@ def backtest_model(df_prices, model_func, model_name, N_paths, T_test_days, **pa
             rho=params['rho']
         )
     elif model_name == "Merton":
-        # Merton usa mu, sigma, lambda_j, m, v
         log_returns = np.log(train_prices / train_prices.shift(1)).dropna()
         mu, sigma = estimate_gbm_parameters(log_returns)
         
@@ -144,8 +141,8 @@ def backtest_model(df_prices, model_func, model_name, N_paths, T_test_days, **pa
         
         simulated_paths = model_func(
             S0=S0, 
-            mu=mu_annualized, # Anualizar mu
-            sigma=sigma_annualized, # Anualizar sigma
+            mu=mu_annualized,
+            sigma=sigma_annualized,
             T=T, 
             N_paths=N_paths, 
             N_steps=N_steps,
@@ -161,7 +158,9 @@ def backtest_model(df_prices, model_func, model_name, N_paths, T_test_days, **pa
     simulated_mean = np.mean(simulated_paths, axis=1)
     
     # Asegurarse de que las longitudes coincidan
-    actual_prices = test_prices.values
+    
+    # CORRECCIÓN CLAVE: Usamos .values.flatten() para garantizar que sea 1D
+    actual_prices = test_prices.values.flatten()
     predicted_prices = simulated_mean[1:] 
     
     if len(actual_prices) != len(predicted_prices):

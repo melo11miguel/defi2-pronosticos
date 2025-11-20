@@ -1,467 +1,468 @@
-import yfinance as yf
 import numpy as np
 import pandas as pd
-from scipy.stats import norm, poisson
-from scipy.optimize import minimize
-from math import sqrt
+import yfinance as yf
+import matplotlib.pyplot as plt
+import streamlit as st
+from datetime import date, timedelta
 import warnings
 
-# Ignorar advertencias de optimización para un output más limpio
-warnings.filterwarnings("ignore", category=RuntimeWarning)
+# Ignorar advertencias de matplotlib y pandas para una interfaz limpia
+warnings.filterwarnings('ignore', category=FutureWarning)
 
-# ==============================================================================
-# 1. FUNCIONES DE DESCARGA Y PREPARACIÓN DE DATOS
-# ==============================================================================
+# =========================================================
+# CONFIGURACIÓN GENERAL DE LA PÁGINA
+# =========================================================
+st.set_page_config(
+    page_title="Modelos GBM - Heston - Merton",
+    layout="wide"
+)
 
-def fetch_data(ticker, start_date, end_date):
+st.title("Simulación y Backtesting: GBM, Heston y Merton")
+st.markdown(
+    "Aplicación para descargar activos de Yahoo Finance, "
+    "simular tres modelos estocásticos (GBM, Merton, Heston) y escoger el mejor por **RMSE**."
+)
+
+# =========================================================
+# FUNCIONES AUXILIARES Y DE DATOS
+# =========================================================
+@st.cache_data
+def download_prices(ticker: str, start: str, end: str) -> pd.Series | None:
     """
-    Descarga los datos históricos del precio de cierre de un activo.
-
-    :param ticker: Símbolo del activo (ej: 'AAPL', '^GSPC').
-    :param start_date: Fecha de inicio (YYYY-MM-DD).
-    :param end_date: Fecha de fin (YYYY-MM-DD).
-    :return: DataFrame de pandas con el precio de cierre.
+    Descarga precios de Yahoo Finance y devuelve la serie de 'Adj Close' (o similar).
     """
-    print(f"Descargando datos para {ticker} desde {start_date} hasta {end_date}...")
-    try:
-        data = yf.download(ticker, start=start_date, end=end_date)
-        if data.empty:
-            raise ValueError("No se encontraron datos para el ticker o el rango de fechas especificado.")
-        return data['Adj Close']
-    except Exception as e:
-        print(f"Error al descargar datos: {e}")
+    # Descargar data de Yahoo Finance
+    data = yf.download(ticker, start=start, end=end, progress=False)
+    
+    if data.empty:
         return None
 
-def calculate_log_returns(prices):
-    """
-    Calcula los retornos logarítmicos diarios.
-    """
+    # Intentar obtener la columna de cierre ajustado o cierre
+    for col in ["Adj Close", "Close", "close", "adjclose"]:
+        if col in data.columns:
+            # Drop NaN y asegurar tipo flotante
+            s = data[col].dropna()
+            if not s.empty:
+                return s.astype(float)
+
+    return None
+
+
+def compute_log_returns(prices: pd.Series) -> pd.Series:
+    """Calcula los retornos logarítmicos diarios."""
     return np.log(prices / prices.shift(1)).dropna()
 
-# ==============================================================================
-# 2. CALIBRACIÓN DE PARÁMETROS BÁSICOS
-# ==============================================================================
 
-def get_basic_parameters(log_returns, dt=1/252):
-    """
-    Calcula la deriva (mu) y la volatilidad (sigma) anualizadas.
-    
-    :param dt: Intervalo de tiempo, 1/252 para días hábiles.
-    :return: mu, sigma
-    """
-    # Media de los retornos logarítmicos
-    mu_daily = log_returns.mean()
-    # Desviación estándar de los retornos logarítmicos
-    sigma_daily = log_returns.std()
-    
-    # Anualización
-    mu = mu_daily / dt + 0.5 * sigma_daily**2 / dt # Deriva (drift) ajustada a la media del activo
-    sigma = sigma_daily / np.sqrt(dt) # Volatilidad anual
-    
-    # Parámetros para la simulación
-    r = mu_daily / dt # Usamos el drift del activo como tasa de riesgo neutral efectiva
-    v0 = sigma_daily # Volatilidad diaria
-    
-    print(f"\n--- Parámetros Calibrados (Anualizados) ---")
-    print(f"Deriva (mu): {mu:.4f}")
-    print(f"Volatilidad (sigma): {sigma:.4f}")
-    print(f"-------------------------------------------")
+def train_test_split_series(series: pd.Series, test_size: float = 0.2):
+    """Divide la serie de tiempo en entrenamiento y prueba."""
+    n = len(series)
+    # Asegurar un mínimo de 5 días para test
+    n_test = max(5, int(n * test_size))
+    # Asegurar que el set de test no es más grande que el total
+    if n_test >= n:
+        n_test = max(1, n - 1)
 
-    # Devolvemos los parámetros calibrados anualmente (mu, sigma) y los
-    # parámetros diarios para la simulación (r_daily, v_daily)
-    return mu, sigma, mu_daily, sigma_daily
+    train = series.iloc[:-n_test]
+    test = series.iloc[-n_test:]
+    return train, test
 
-# ==============================================================================
-# 3. SIMULACIÓN DE MODELOS ESTOCÁSTICOS (RISK-NEUTRAL)
-# ==============================================================================
 
-def simulate_gbm(S0, mu, sigma, T, N, M=1):
+def compute_rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Calcula la Raíz del Error Cuadrático Medio (RMSE)."""
+    y_true = np.array(y_true, dtype=float)
+    y_pred = np.array(y_pred, dtype=float)
+    return np.sqrt(np.mean((y_true - y_pred) ** 2))
+
+
+# =========================================================
+# MODELO 1: MOVIMIENTO GEOMÉTRICO BROWNIANO (GBM)
+# =========================================================
+def estimate_gbm_params(prices: pd.Series):
     """
-    Simulación del Movimiento Browniano Geométrico (MBG).
-    
-    dS_t = mu * S_t * dt + sigma * S_t * dW_t
-    
-    :param S0: Precio inicial.
-    :param mu: Deriva anual (drift).
-    :param sigma: Volatilidad anual.
-    :param T: Tiempo total de simulación (en años).
-    :param N: Número de pasos de tiempo.
-    :param M: Número de trayectorias (simulaciones).
-    :return: Matriz de precios simulados (N+1 x M).
+    Estima mu y sigma anuales de un GBM a partir de retornos log diarios.
     """
-    dt = T / N
-    # Usamos la fórmula de Euler-Maruyama discreta (con el término de corrección)
-    dW = norm.rvs(size=(N, M), scale=np.sqrt(dt)) 
+    r = compute_log_returns(prices)
+    mu_daily = r.mean()
+    sigma_daily = r.std()
     
-    S = np.zeros((N + 1, M))
-    S[0] = S0
-    
-    # La tasa de riesgo-neutral (mu - 0.5 * sigma^2) es más adecuada para simular,
-    # pero usamos el mu directo si los parámetros ya están ajustados.
-    
-    # Ecuación de simulación: S[i] = S[i-1] * exp((mu - 0.5 * sigma^2) * dt + sigma * dW_i)
-    # Por simplicidad en el backtesting, usamos la formulación directa de Euler:
-    for t in range(1, N + 1):
-        # Fórmula discreta del GBM (Euler-Maruyama)
-        S[t] = S[t-1] * np.exp((mu - 0.5 * sigma**2) * dt + sigma * dW[t-1])
-        
+    # Asunción de 252 días de trading al año
+    mu_annual = mu_daily * 252
+    sigma_annual = sigma_daily * np.sqrt(252)
+
+    return mu_annual, sigma_annual
+
+
+def simulate_gbm_paths(S0: float, mu: float, sigma: float,
+                       dt: float, n_steps: int, n_paths: int, seed: int = 42):
+    """Simula trayectorias de precios usando GBM."""
+    np.random.seed(seed)
+    S = np.zeros((n_steps + 1, n_paths))
+    S[0, :] = S0
+
+    # Términos para la discretización de Euler (Log-GBM)
+    mu_dt = (mu - 0.5 * sigma ** 2) * dt
+    sigma_sqrt_dt = sigma * np.sqrt(dt)
+
+    for t in range(1, n_steps + 1):
+        z = np.random.normal(size=n_paths)
+        # S(t) = S(t-1) * exp(drift_term + diffusion_term * Z)
+        S[t, :] = S[t - 1, :] * np.exp(mu_dt + sigma_sqrt_dt * z)
+
     return S
 
-# ------------------------------------------------------------------------------
-# CALIBRACIÓN Y SIMULACIÓN DE MERTON (JUMP-DIFFUSION)
-# ------------------------------------------------------------------------------
 
-def calibration_merton(params, log_returns):
-    """Función objetivo para calibrar el modelo de Merton (minimizar la diferencia
-    entre la distribución empírica de retornos y la distribución de Merton).
-    Aquí usamos la varianza como proxy simple para el ejemplo."""
-    
-    # Parámetros a estimar: [lambda (frecuencia), mu_J (media del salto), sigma_J (desviación del salto)]
-    # Asumimos que mu y sigma_difusión vienen del MBG.
-    
-    lambda_p, mu_J, sigma_J = params
-    
-    # Varianza teórica de Merton: Var(r) = sigma_difusión^2 + lambda_p * (mu_J^2 + sigma_J^2)
-    # Calibramos solo la parte de salto, asumiendo la varianza de difusión como constante.
-    
-    # Para la simpleza de este ejemplo, devolveremos un valor grande para evitar optimización compleja
-    # La calibración real de Merton requiere MLE (Máxima Verosimilitud) compleja.
-    # En un entorno real, no se haría de esta forma simplificada.
-    
-    return np.mean((log_returns.var() - (0.01 + lambda_p * (mu_J**2 + sigma_J**2)))**2) * 1000 
-
-def calibrate_merton_simple(log_returns):
-    """Calibración simple de Merton (valores iniciales razonables)."""
-    # Valores iniciales: lambda (1 salto al año), mu_J (media del 0%), sigma_J (desviación del 1%)
-    initial_params = [1.0, 0.0, 0.01]
-    
-    # Solo devolveremos los valores iniciales para evitar una optimización inestable
-    # La calibración real de Merton es muy intensiva.
-    # res = minimize(calibration_merton, initial_params, args=(log_returns,), method='L-BFGS-B')
-    # lambda_p, mu_J, sigma_J = res.x
-    
-    lambda_p, mu_J, sigma_J = initial_params
-    
-    print(f"\n--- Parámetros Calibrados de Merton (Iniciales Simples) ---")
-    print(f"Frecuencia de salto (lambda): {lambda_p:.4f}")
-    print(f"Media del salto (mu_J): {mu_J:.4f}")
-    print(f"Desviación estándar del salto (sigma_J): {sigma_J:.4f}")
-    print(f"----------------------------------------------------------")
-    return lambda_p, mu_J, sigma_J
-
-
-def simulate_merton(S0, mu, sigma, lambda_p, mu_J, sigma_J, T, N, M=1):
+# =========================================================
+# MODELO 2: MERTON (JUMP DIFFUSION)
+# =========================================================
+def estimate_merton_params(prices: pd.Series,
+                           jump_threshold_sigma: float = 3.0):
     """
-    Simulación del Modelo de Salto-Difusión de Merton.
-    
-    dS_t = S_t * (mu - lambda * E[J]) * dt + S_t * sigma * dW_t + S_{t-} * dJ_t
-    
-    :param lambda_p: Frecuencia de saltos por año (Poisson rate).
-    :param mu_J: Media del tamaño del salto logarítmico.
-    :param sigma_J: Desviación del tamaño del salto logarítmico.
-    :return: Matriz de precios simulados.
+    Estima parámetros de Merton (lambda, mu_J, sigma_J) de forma simple.
+    El componente GBM (mu, sigma) se estima igual que el GBM puro.
     """
-    dt = T / N
-    
-    # 1. Componente de Difusión (MBG)
-    dW = norm.rvs(size=(N, M), scale=np.sqrt(dt)) 
-    
-    # 2. Componente de Salto (Poisson)
-    # Generar el número de saltos en cada paso de tiempo
-    dN = poisson.rvs(lambda_p * dt, size=(N, M))
-    # Generar el tamaño del salto (log-normal)
-    dJ = norm.rvs(loc=mu_J, scale=sigma_J, size=(N, M))
-    
-    # 3. Corrección de la deriva (para mantener riesgo-neutral)
-    # E[J] = exp(mu_J + 0.5 * sigma_J^2) - 1. Aquí usamos E[log(1+J)] = mu_J
-    # Factor de corrección: gamma = mu - lambda * (exp(mu_J + 0.5 * sigma_J^2) - 1)
-    
-    gamma = mu - lambda_p * (np.exp(mu_J + 0.5 * sigma_J**2) - 1)
-    
-    S = np.zeros((N + 1, M))
-    S[0] = S0
-    
-    for t in range(1, N + 1):
-        # Componente de Difusión y Deriva
-        diffusion_term = (gamma - 0.5 * sigma**2) * dt + sigma * dW[t-1]
-        
-        # Componente de Salto
-        jump_term = np.where(dN[t-1] > 0, np.sum(norm.rvs(loc=mu_J, scale=sigma_J, size=(dN[t-1].max(), M)), axis=0), 0.0)
-        
-        # S[t] = S[t-1] * exp(Difusión + Salto)
-        S[t] = S[t-1] * np.exp(diffusion_term + jump_term)
-        
-    return S
+    r = compute_log_returns(prices)
+    mu_daily = r.mean()
+    sigma_daily = r.std()
 
-# ------------------------------------------------------------------------------
-# CALIBRACIÓN Y SIMULACIÓN DE HESTON (VOLATILIDAD ESTOCÁSTICA)
-# ------------------------------------------------------------------------------
+    # 1. Componente GBM
+    mu_annual = mu_daily * 252
+    sigma_annual = sigma_daily * np.sqrt(252)
 
-def calibration_heston(params, log_returns):
-    """Función objetivo simple para la calibración de Heston.
-    La calibración real requiere métodos complejos de Fourier/MCL."""
-    
-    # Parámetros a estimar: [kappa, theta, xi, rho]
-    # Asumimos que r y v0 (volatilidad inicial) vienen del MBG.
-    kappa, theta, xi, rho = params
-    
-    # Para la simpleza, devolveremos un valor grande para evitar optimización inestable
-    # En un entorno real, se usaría un método de optimización numérica sobre
-    # la función de densidad o precios de opciones (Opciones de VIX o VIX en sí).
-    
-    # Usamos la varianza de la varianza como proxy
-    vol_of_vol = log_returns.rolling(window=20).std().dropna().std()
-    
-    # La varianza teórica del modelo Heston para el precio de la opción no es simple.
-    # Aquí solo calibraremos la varianza de la volatilidad.
-    # Objetivo: theta (varianza a largo plazo) se acerque a la varianza histórica media
-    # y kappa (velocidad de reversión) sea positiva.
-    
-    target_var = log_returns.var() * 252 # Varianza anual
-    
-    # Penalización por alejarse de la varianza histórica y por parámetros no válidos
-    penalty = (theta - target_var)**2 + (1 - rho**2)**2 * 1000 + (xi < 0.001) * 1000
-    
-    return penalty
+    # 2. Detección de saltos (Saltos > 3 desviaciones estándar)
+    z_scores = (r - mu_daily) / sigma_daily
+    jumps = r[np.abs(z_scores) > jump_threshold_sigma]
 
-def calibrate_heston_simple(log_returns, sigma_daily):
-    """Calibración simple de Heston (valores iniciales razonables)."""
-    
-    # Volatilidad inicial v0 (varianza diaria)
-    v0 = sigma_daily**2 
-    
-    # Varianza media anual de los retornos (Theta - Varianza a largo plazo)
-    theta_initial = log_returns.var() * 252
-    
-    # Valores iniciales: [kappa (Velocidad de reversión), theta (Varianza a largo plazo), xi (Vol de vol), rho (Correlación)]
-    # kappa debe ser positivo y rho entre -1 y 1
-    initial_params = [2.0, theta_initial, 0.2, -0.7]
-    
-    # La calibración real es compleja. Solo devolveremos los valores iniciales ajustados
-    # res = minimize(calibration_heston, initial_params, args=(log_returns,), method='L-BFGS-B', bounds=[(0.01, 5), (0.0001, 0.5), (0.001, 1.0), (-0.99, 0.99)])
-    # kappa, theta, xi, rho = res.x
-    
-    kappa, theta, xi, rho = initial_params
-    
-    print(f"\n--- Parámetros Calibrados de Heston (Iniciales Simples) ---")
-    print(f"Varianza Inicial (v0): {v0:.6f}")
-    print(f"Velocidad de reversión (kappa): {kappa:.4f}")
-    print(f"Varianza a largo plazo (theta): {theta:.6f}")
-    print(f"Volatilidad de la volatilidad (xi): {xi:.4f}")
-    print(f"Correlación (rho): {rho:.4f}")
-    print(f"----------------------------------------------------------")
-    
-    return v0, kappa, theta, xi, rho
+    n_days = len(r)
+    years = n_days / 252
 
-def simulate_heston(S0, v0, kappa, theta, xi, rho, T, N, M=1, mu=0.0):
-    """
-    Simulación del Modelo de Heston (Volatilidad Estocástica).
-    
-    Ecuación de precios: dS_t = mu * S_t * dt + sqrt(v_t) * S_t * dW1_t
-    Ecuación de volatilidad: dv_t = kappa * (theta - v_t) * dt + xi * sqrt(v_t) * dW2_t
-    donde dW1_t y dW2_t están correlacionados con rho.
-    
-    :param v0: Varianza inicial (volatilidad^2).
-    :return: Matriz de precios simulados.
-    """
-    dt = T / N
-    
-    # Generar números aleatorios correlacionados
-    Z1 = norm.rvs(size=(N, M))
-    Z2 = norm.rvs(size=(N, M))
-    
-    dW1 = np.sqrt(dt) * Z1 # Movimiento Browniano para el precio
-    dW2 = np.sqrt(dt) * (rho * Z1 + np.sqrt(1 - rho**2) * Z2) # Movimiento Browniano para la varianza
-    
-    S = np.zeros((N + 1, M))
-    v = np.zeros((N + 1, M))
-    
-    S[0] = S0
-    v[0] = v0
-    
-    for t in range(1, N + 1):
-        # 1. Simulación de la Varianza (Método de Euler con Absorbing/Reflection)
-        # Aseguramos que la varianza no sea negativa (Trunca a 0 si es < 0)
-        dv_t = kappa * (theta - v[t-1]) * dt + xi * np.sqrt(v[t-1]) * dW2[t-1]
-        v[t] = v[t-1] + dv_t
-        v[t] = np.maximum(v[t], 0) # Reflection (o Absorbing) Boundary
-        
-        # 2. Simulación del Precio (usando la nueva varianza)
-        ds_t = mu * S[t-1] * dt + np.sqrt(v[t-1]) * S[t-1] * dW1[t-1]
-        S[t] = S[t-1] + ds_t
-        
-    return S
-
-# ==============================================================================
-# 4. BACKTESTING Y MÉTRICAS
-# ==============================================================================
-
-def calculate_rmse(historical_prices, simulated_paths):
-    """
-    Calcula el Error Cuadrático Medio (RMSE) entre los precios históricos
-    y la media de las trayectorias simuladas.
-    
-    :param historical_prices: Precios observados (Serie de pandas).
-    :param simulated_paths: Matriz de precios simulados (N+1 x M).
-    :return: RMSE.
-    """
-    # 1. Asegurar que las longitudes coincidan
-    # La simulación tiene (N+1) puntos. Quitamos el punto inicial para comparar N puntos.
-    
-    # Cortar los precios históricos para que coincidan con la longitud de la simulación
-    N_sim = simulated_paths.shape[0] - 1 
-    if len(historical_prices) < N_sim + 1:
-        # Esto debería manejarse antes, pero como fallback, recortamos la simulación
-        sim_mean = simulated_paths[:len(historical_prices)].mean(axis=1)
-        print("Advertencia: Longitud histórica menor que la simulación.")
+    if len(jumps) > 0 and years > 0:
+        lam = len(jumps) / years  # Intensidad anual (frecuencia de saltos)
+        mu_J = jumps.mean()       # Tamaño medio del salto
+        sigma_J = jumps.std() if len(jumps) > 1 else 0.01
     else:
-        # Usamos la ventana histórica que coincide con la simulación
-        hist_window = historical_prices[-N_sim-1:]
-        sim_mean = simulated_paths.mean(axis=1)
+        # Valores de respaldo si no se detectan saltos significativos
+        lam = 0.1
+        mu_J = 0.0
+        sigma_J = 0.01
 
-    # El RMSE se calcula solo para los precios futuros, no incluyendo S0
-    rmse = np.sqrt(np.mean((hist_window.values[1:] - sim_mean[1:])**2))
-    
-    return rmse
+    return mu_annual, sigma_annual, lam, mu_J, sigma_J
 
-# ==============================================================================
-# 5. FUNCIÓN PRINCIPAL DE EJECUCIÓN
-# ==============================================================================
 
-def run_backtesting(ticker, start_date, end_date, simulation_days, num_simulations=1000):
+def simulate_merton_paths(S0: float,
+                          mu: float,
+                          sigma: float,
+                          lam: float,
+                          mu_J: float,
+                          sigma_J: float,
+                          dt: float,
+                          n_steps: int,
+                          n_paths: int,
+                          seed: int = 123):
+    """Simula trayectorias de precios usando el modelo de Merton (Jump Diffusion)."""
+    np.random.seed(seed)
+    S = np.zeros((n_steps + 1, n_paths))
+    S[0, :] = S0
+
+    # Drift ajustado por el componente de saltos (compensación)
+    drift = (mu - 0.5 * sigma ** 2 - lam * mu_J) * dt
+    diff_coeff = sigma * np.sqrt(dt)
+
+    for t in range(1, n_steps + 1):
+        # 1. Difusión (Browniano)
+        z = np.random.normal(size=n_paths)
+        dW = diff_coeff * z
+
+        # 2. Saltos (Poisson)
+        N = np.random.poisson(lam * dt, size=n_paths) # Número de saltos en dt
+        J = np.zeros(n_paths)
+        
+        mask_jumps = N > 0
+        if np.any(mask_jumps):
+            Nj = N[mask_jumps]
+            # La suma de N_j saltos Normales ~ Normal(N_j * mu_J, sqrt(N_j) * sigma_J)
+            J[mask_jumps] = np.random.normal(
+                loc=Nj * mu_J,
+                scale=np.sqrt(Nj) * sigma_J
+            )
+
+        log_factor = drift + dW + J
+        S[t, :] = S[t - 1, :] * np.exp(log_factor)
+
+    return S
+
+
+# =========================================================
+# MODELO 3: HESTON (VOLATILIDAD ESTOCÁSTICA)
+# =========================================================
+def estimate_heston_params(prices: pd.Series):
     """
-    Ejecuta el flujo completo de descarga, calibración, simulación y backtesting.
+    Estimación simplificada para Heston. Idealmente, los parámetros de Heston 
+    (kappa, theta, xi, rho) se estiman usando MLE o métodos GMM, pero aquí 
+    usamos valores históricos simples y valores típicos para los parámetros 
+    de reversión y vol-of-vol.
     """
-    # 1. Descargar datos
-    prices = fetch_data(ticker, start_date, end_date)
-    if prices is None:
-        return
+    r = compute_log_returns(prices)
+    mu_daily = r.mean()
+    sigma_daily = r.std()
 
-    # 2. Dividir datos para calibración y backtesting
-    # Usamos el precio final del set de calibración como S0
-    S0_historical = prices.iloc[-simulation_days] # Precio inicial para la simulación
-    
-    # Datos de calibración
-    calibration_prices = prices.iloc[:-simulation_days]
-    calibration_log_returns = calculate_log_returns(calibration_prices)
-    
-    # Datos de backtesting (histórico real)
-    backtest_prices = prices.iloc[-simulation_days-1:]
-    
-    if len(calibration_log_returns) < 50:
-        print("Error: No hay suficientes datos para la calibración. Ajuste las fechas o los días de simulación.")
-        return
+    mu_annual = mu_daily * 252
 
-    print(f"\n--- Backtesting de {ticker} ---")
-    print(f"Periodo de Calibración: {calibration_prices.index[0].strftime('%Y-%m-%d')} a {calibration_prices.index[-1].strftime('%Y-%m-%d')}")
-    print(f"Día de Simulación (S0): {backtest_prices.index[0].strftime('%Y-%m-%d')} (Precio: ${S0_historical:.2f})")
-    print(f"Días a Simular: {simulation_days} (Hasta {prices.index[-1].strftime('%Y-%m-%d')})")
-    
-    # 3. Calibrar parámetros básicos (MBG)
-    mu, sigma, mu_daily, sigma_daily = get_basic_parameters(calibration_log_returns, dt=1/252)
+    var_daily = sigma_daily ** 2
+    v0 = var_daily
+    theta = var_daily  # Varianza de largo plazo ~ varianza histórica
 
-    # ------------------------------------
-    # Simulación y RMSE para MBG
-    # ------------------------------------
-    print("\n[Modelo 1: Movimiento Browniano Geométrico]")
-    # Usamos mu_daily y sigma_daily como r y v para la simulación
-    gbm_paths = simulate_gbm(S0_historical, mu_daily, sigma_daily, simulation_days/252, simulation_days, num_simulations)
-    rmse_gbm = calculate_rmse(backtest_prices, gbm_paths)
-    print(f"RMSE (MBG): {rmse_gbm:.4f}")
+    # Parámetros "típicos" (se pueden ajustar)
+    kappa = 1.5      # Velocidad de reversión a la media
+    xi = 0.5         # Volatilidad de la volatilidad (vol-of-vol)
+    rho = -0.7       # Correlación entre el activo y la volatilidad
 
-    # ------------------------------------
-    # Calibración, Simulación y RMSE para MERTON
-    # ------------------------------------
-    # Calibrar Merton (saltos)
-    lambda_p, mu_J, sigma_J = calibrate_merton_simple(calibration_log_returns)
-    
-    print("\n[Modelo 2: Salto-Difusión de Merton]")
-    # Usamos mu_daily y sigma_daily como mu y sigma de difusión
-    merton_paths = simulate_merton(S0_historical, mu_daily, sigma_daily, lambda_p, mu_J, sigma_J, simulation_days/252, simulation_days, num_simulations)
-    rmse_merton = calculate_rmse(backtest_prices, merton_paths)
-    print(f"RMSE (Merton): {rmse_merton:.4f}")
+    return mu_annual, v0, kappa, theta, xi, rho
 
-    # ------------------------------------
-    # Calibración, Simulación y RMSE para HESTON
-    # ------------------------------------
-    # Calibrar Heston (volatilidad estocástica)
-    v0, kappa, theta, xi, rho = calibrate_heston_simple(calibration_log_returns, sigma_daily)
-    
-    print("\n[Modelo 3: Volatilidad Estocástica de Heston]")
-    # Usamos mu_daily como drift (r)
-    heston_paths = simulate_heston(S0_historical, v0, kappa, theta, xi, rho, simulation_days/252, simulation_days, num_simulations, mu=mu_daily)
-    rmse_heston = calculate_rmse(backtest_prices, heston_paths)
-    print(f"RMSE (Heston): {rmse_heston:.4f}")
-    
-    # ------------------------------------
-    # Resultado Final
-    # ------------------------------------
-    results = {
-        'MBG': rmse_gbm,
-        'Merton': rmse_merton,
-        'Heston': rmse_heston
-    }
-    
-    best_model = min(results, key=results.get)
-    
-    print(f"\n=======================================================")
-    print(f"El mejor modelo (menor RMSE) para {ticker} es: {best_model}")
-    print(f"=======================================================")
-    
-    # ------------------------------------
-    # Preparar datos para la visualización en Streamlit
-    # ------------------------------------
-    
-    # Crear un DataFrame con las trayectorias simuladas y el precio histórico real
-    # para Streamlit. Solo la media de la simulación.
-    
-    dates = backtest_prices.index[1:] # Fechas simuladas (excluyendo S0)
-    
-    # Asegurar que las longitudes coincidan (quitando S0)
-    data_for_streamlit = pd.DataFrame({
-        'Fecha': dates,
-        f'{ticker} Real': backtest_prices.values[1:],
-        'MBG Simulado (Media)': gbm_paths.mean(axis=1)[1:],
-        'Merton Simulado (Media)': merton_paths.mean(axis=1)[1:],
-        'Heston Simulado (Media)': heston_paths.mean(axis=1)[1:],
-    }).set_index('Fecha')
-    
-    print("\nDataFrame de resultados para Streamlit generado.")
-    # El archivo debe guardarse o serializarse para Streamlit.
-    # Usaremos una variable global/return para este ejemplo.
-    return results, data_for_streamlit
+# Las ecuaciones diferenciales estocásticas de Heston (SDEs) son:
+# dS_t = mu S_t dt + sqrt(v_t) S_t dW_{S,t}
+# dv_t = kappa (theta - v_t) dt + xi sqrt(v_t) dW_{v,t}
+# Donde dW_{S,t} y dW_{v,t} están correlacionados por rho.
+# 
+
+def simulate_heston_paths(S0: float,
+                          mu: float,
+                          v0: float,
+                          kappa: float,
+                          theta: float,
+                          xi: float,
+                          rho: float,
+                          dt: float,
+                          n_steps: int,
+                          n_paths: int,
+                          seed: int = 999):
+    """Simula trayectorias de precios usando el modelo de Heston con esquema de Full Truncation."""
+    np.random.seed(seed)
+    S = np.zeros((n_steps + 1, n_paths))
+    v = np.zeros((n_steps + 1, n_paths)) # Trayectorias de la varianza
+
+    S[0, :] = S0
+    v[0, :] = v0
+
+    for t in range(1, n_steps + 1):
+        # Generar movimientos brownianos independientes
+        z1 = np.random.normal(size=n_paths)
+        z2 = np.random.normal(size=n_paths)
+
+        # Correlacionar los brownianos
+        dW_v = np.sqrt(dt) * z2
+        dW_s = np.sqrt(dt) * (rho * z2 + np.sqrt(1 - rho ** 2) * z1)
+
+        # Aplicar Full Truncation para la varianza (evitar sqrt(v) de números negativos)
+        v_prev = np.clip(v[t - 1, :], 1e-8, None)
+
+        # 1. Actualización de la Varianza (v)
+        dv = kappa * (theta - v_prev) * dt + xi * np.sqrt(v_prev) * dW_v
+        v_t = v_prev + dv
+        v_t = np.clip(v_t, 1e-8, None) # Truncamiento completo después del paso
+
+        # 2. Actualización del Precio (S) - usando la SDE del log-precio
+        dS = (mu - 0.5 * v_prev) * dt + np.sqrt(v_prev) * dW_s
+        S[t, :] = S[t - 1, :] * np.exp(dS)
+        
+        v[t, :] = v_t
+
+    return S, v
 
 
-if __name__ == '__main__':
-    # --- CONFIGURACIÓN DEL USUARIO ---
+# =========================================================
+# GRÁFICOS Y VISUALIZACIÓN
+# =========================================================
+def make_fan_chart(test_index, S_paths, real_prices, title: str):
+    """
+    Genera una figura de abanico (percentiles) y superpone la serie real.
+    S_paths: matriz (n_steps+1, n_paths). Ignoramos t=0 para backtest.
+    """
+    # El set de prueba tiene n_steps observaciones (t=1 a t=n_steps)
+    n_steps = S_paths.shape[0] - 1
+
+    # Calcular percentiles para cada paso de tiempo
+    percentiles = np.percentile(S_paths[1:, :], [5, 25, 50, 75, 95], axis=1)
+    p5, p25, p50, p75, p95 = percentiles
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    # Abanico (Fan Chart)
+    ax.fill_between(test_index, p5, p95, color='#4CAF50', alpha=0.1, label="5%-95%")
+    ax.fill_between(test_index, p25, p75, color='#4CAF50', alpha=0.3, label="25%-75%")
+    ax.plot(test_index, p50, color='#2196F3', label="Mediana simulada", linewidth=2, linestyle='--')
+
+    # Serie real
+    ax.plot(test_index, real_prices.values, color='#E91E63', label="Precio real (Test)", linewidth=2)
+
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.set_xlabel("Fecha", fontsize=12)
+    ax.set_ylabel("Precio", fontsize=12)
+    ax.legend(loc='upper left')
+    ax.grid(True, alpha=0.4)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+
+    return fig
+
+
+# =========================================================
+# INTERFAZ DE LA APP (STREAMLIT)
+# =========================================================
+
+# --- Sidebar: parámetros de usuario ---
+st.sidebar.header("Parámetros de simulación")
+
+default_end = date.today()
+default_start = default_end - timedelta(days=5 * 365) # 5 años de datos
+
+ticker = st.sidebar.text_input("Ticker (Yahoo Finance)", value="AAPL")
+start_date = st.sidebar.date_input("Fecha inicio", value=default_start)
+end_date = st.sidebar.date_input("Fecha fin", value=default_end)
+
+test_size = st.sidebar.slider("Proporción de datos para test (backtest)",
+                              min_value=0.05, max_value=0.5, value=0.2, step=0.05)
+
+n_paths = st.sidebar.slider("Número de trayectorias simuladas",
+                            min_value=100, max_value=2000, value=500, step=100)
+
+st.sidebar.markdown(
+    """
+    ***Notas de la Simulación:***
+    * `dt` se asume como $1/252$ (pasos diarios).
+    * Los parámetros de Heston y Merton se estiman de forma simplificada a partir de la historia.
+    """
+)
+
+if st.sidebar.button("Ejecutar modelos", type="primary"):
+    if start_date >= end_date:
+        st.error("La fecha de inicio debe ser anterior a la fecha de fin.")
+        st.stop()
     
-    # Ticker que deseas analizar (ej: 'GOOG', 'TSLA', '^GSPC')
-    TICKER = 'AAPL' 
+    # --- Descarga de Datos ---
+    with st.spinner(f"Descargando datos para {ticker}..."):
+        prices = download_prices(
+            ticker=ticker,
+            start=str(start_date),
+            end=str(end_date)
+        )
+
+    if prices is None or len(prices) < 260:
+        st.error("No se pudo descargar el activo o hay muy pocos datos (mínimo recomendado: ~260 días).")
+        st.stop()
+
+    # --- División de Datos ---
+    train_prices, test_prices = train_test_split_series(prices, test_size=test_size)
     
-    # Rango de fechas para OBTENER todos los datos (Calibración + Simulación)
-    # Se recomienda un rango de al menos 1-2 años para calibrar bien.
-    START_DATE = '2023-01-01' 
-    END_DATE = pd.to_datetime('today').strftime('%Y-%m-%d')
+    st.subheader(f"Serie de precios: {ticker}")
+    st.line_chart(prices)
+
+    st.markdown("---")
+    st.markdown(f"**Parámetros de Backtesting:**")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Activo Inicial ($S_0$)", f"${train_prices.iloc[-1]:.2f}")
+    col2.metric("Período de Entrenamiento", f"{train_prices.index[0].date()} a {train_prices.index[-1].date()} ({len(train_prices)} obs.)")
+    col3.metric("Período de Prueba (Backtest)", f"{test_prices.index[0].date()} a {test_prices.index[-1].date()} ({len(test_prices)} obs.)")
+    st.markdown("---")
+
+
+    S0 = train_prices.iloc[-1]
+    n_steps = len(test_prices)
+    dt = 1 / 252
+
+    results = {}
     
-    # Número de días hábiles que deseas simular/backtestear (ej: los últimos 30 días)
-    # Los datos serán divididos: el resto para calibración y esta cantidad para simulación.
-    SIMULATION_DAYS = 30 
+    # -----------------------------------------------------
+    # SIMULACIÓN Y BACKTESTING
+    # -----------------------------------------------------
     
-    # Número de trayectorias de Monte Carlo
-    NUM_SIMULATIONS = 1000 
-    
-    # --- EJECUCIÓN ---
-    
-    results, data_for_streamlit = run_backtesting(
-        ticker=TICKER,
-        start_date=START_DATE,
-        end_date=END_DATE,
-        simulation_days=SIMULATION_DAYS,
-        num_simulations=NUM_SIMULATIONS
-    )
-    
-    if data_for_streamlit is not None:
-        print("\n--- Vista previa del DataFrame para Streamlit ---")
-        print(data_for_streamlit.tail())
-        # Aquí es donde guardarías el archivo para tu app de Streamlit (ej: .csv, .json)
-        # data_for_streamlit.to_csv('simulacion_resultados.csv')
+    # 1. GBM
+    with st.expander("Simulación GBM", expanded=True):
+        try:
+            mu_gbm, sigma_gbm = estimate_gbm_params(train_prices)
+            st.code(f"GBM Parámetros (anuales): μ={mu_gbm:.4f}, σ={sigma_gbm:.4f}")
+            
+            S_gbm = simulate_gbm_paths(
+                S0=S0, mu=mu_gbm, sigma=sigma_gbm, dt=dt, n_steps=n_steps, n_paths=n_paths, seed=1
+            )
+            gbm_mean = S_gbm[1:, :].mean(axis=1) # Usamos la media de las trayectorias como predicción
+            rmse_gbm = compute_rmse(test_prices.values, gbm_mean)
+
+            fig_gbm = make_fan_chart(
+                test_index=test_prices.index, S_paths=S_gbm, real_prices=test_prices, title=f"GBM Simulación vs. Real"
+            )
+            st.pyplot(fig_gbm)
+            st.info(f"RMSE GBM: {rmse_gbm:.4f}")
+
+            results["GBM"] = {"rmse": rmse_gbm, "fig": fig_gbm}
+        except Exception as e:
+            st.error(f"Error en el modelo GBM: {e}")
+
+    # 2. MERTON
+    with st.expander("Simulación Merton (Jump Diffusion)", expanded=True):
+        try:
+            mu_mer, sigma_mer, lam_mer, mu_J_mer, sigma_J_mer = estimate_merton_params(train_prices)
+            st.code(f"Merton Parámetros (anuales): μ={mu_mer:.4f}, σ_diff={sigma_mer:.4f}, λ={lam_mer:.4f}, μ_J={mu_J_mer:.4f}, σ_J={sigma_J_mer:.4f}")
+
+            S_mer = simulate_merton_paths(
+                S0=S0, mu=mu_mer, sigma=sigma_mer, lam=lam_mer, mu_J=mu_J_mer, sigma_J=sigma_J_mer, 
+                dt=dt, n_steps=n_steps, n_paths=n_paths, seed=2
+            )
+            mer_mean = S_mer[1:, :].mean(axis=1)
+            rmse_mer = compute_rmse(test_prices.values, mer_mean)
+
+            fig_mer = make_fan_chart(
+                test_index=test_prices.index, S_paths=S_mer, real_prices=test_prices, title=f"Merton Simulación vs. Real"
+            )
+            st.pyplot(fig_mer)
+            st.info(f"RMSE Merton: {rmse_mer:.4f}")
+            
+            results["Merton"] = {"rmse": rmse_mer, "fig": fig_mer}
+        except Exception as e:
+            st.error(f"Error en el modelo Merton: {e}")
+
+    # 3. HESTON
+    with st.expander("Simulación Heston (Volatilidad Estocástica)", expanded=True):
+        try:
+            mu_h, v0_h, kappa_h, theta_h, xi_h, rho_h = estimate_heston_params(train_prices)
+            st.code(f"Heston Parámetros (anuales): μ={mu_h:.4f}, v₀={v0_h:.4f}, κ={kappa_h:.4f}, θ={theta_h:.4f}, ξ={xi_h:.4f}, ρ={rho_h:.4f}")
+            
+            S_h, v_h = simulate_heston_paths(
+                S0=S0, mu=mu_h, v0=v0_h, kappa=kappa_h, theta=theta_h, xi=xi_h, rho=rho_h, 
+                dt=dt, n_steps=n_steps, n_paths=n_paths, seed=3
+            )
+            h_mean = S_h[1:, :].mean(axis=1)
+            rmse_h = compute_rmse(test_prices.values, h_mean)
+
+            fig_h = make_fan_chart(
+                test_index=test_prices.index, S_paths=S_h, real_prices=test_prices, title=f"Heston Simulación vs. Real"
+            )
+            st.pyplot(fig_h)
+            st.info(f"RMSE Heston: {rmse_h:.4f}")
+            
+            results["Heston"] = {"rmse": rmse_h, "fig": fig_h}
+        except Exception as e:
+            st.error(f"Error en el modelo Heston: {e}")
+
+    # =====================================================
+    # COMPARACIÓN FINAL DE RESULTADOS
+    # =====================================================
+    if results:
+        st.markdown("## Resumen de Resultados y Selección del Modelo")
+        
+        # Tabla de RMSE
+        rmse_data = {name: info["rmse"] for name, info in results.items()}
+        rmse_table = pd.DataFrame(
+            {"RMSE": rmse_data}
+        ).sort_values("RMSE")
+        
+        st.subheader("Tabla de RMSE (Root Mean Square Error)")
+        st.dataframe(rmse_table.style.format({"RMSE": "{:.4f}"}), use_container_width=True)
+
+        best_model = rmse_table.index[0]
+        st.success(f"¡El modelo con el mejor desempeño (menor RMSE) es: **{best_model}**!")
+
+    else:
+        st.warning("No se pudieron generar resultados para ningún modelo.")
+
+else:
+    st.info("Configura los parámetros del activo y la simulación en el panel lateral (sidebar) y pulsa **'Ejecutar modelos'**.")

@@ -172,6 +172,7 @@ def backtest_model(df_prices, model_func, model_name, N_paths, T_test_days, **pa
     rmse = np.sqrt(mean_squared_error(actual_prices, predicted_prices))
     
     # 5. Crear DataFrame de resultados para visualización
+    # El índice se llama explícitamente 'Fecha'
     results_df = pd.DataFrame({
         'Fecha': test_prices.index,
         'Precio Real': actual_prices,
@@ -295,26 +296,30 @@ def main():
             st.markdown("---")
             st.subheader("4. Visualización de la Predicción (Backtest)")
             
-            # Conversión robusta de Serie a DataFrame para el entrenamiento
+            # 4.1. Preparar datos de entrenamiento (históricos)
             train_plot = pd.DataFrame(train_prices)
             train_plot.columns = ['Precio Real']
+            # CORRECCIÓN: Aseguramos que el índice histórico se llame 'Fecha' para la consistencia
+            train_plot.index.name = 'Fecha' 
 
-            # Combinar los resultados simulados y reales (solo la parte del test)
+            # 4.2. Combinar los resultados simulados y reales (solo la parte del test)
             combined_df_test = results_gbm.join(results_heston.iloc[:, 1]).join(results_merton.iloc[:, 1])
+            # La columna 'Precio Real' en combined_df_test es el precio real en el periodo de test
             combined_df_test.columns = ['Precio Real', 'GBM', 'Heston', 'Merton']
             
-            # Renombramos la columna de precio real del set de entrenamiento para evitar duplicados en el concat
+            # 4.3. Renombramos la columna del histórico para evitar duplicados al concatenar
             train_plot.columns = ['Real (Histórico)']
 
-            # Usamos pd.concat para unir el histórico y el test simulado
+            # 4.4. Unir el histórico y el test simulado
             plot_df = pd.concat([train_plot, combined_df_test.drop(columns=['Precio Real'])], axis=0)
 
-            # Renombrar para claridad en la leyenda del gráfico final
+            # 4.5. Renombrar para claridad
             plot_df = plot_df.rename(columns={'Real (Histórico)': 'Precio Real'})
             
-            # Reestructurar el DataFrame de ancho a largo para Plotly
+            # 4.6. Reestructurar el DataFrame de ancho a largo para Plotly
             plot_long = plot_df.reset_index().melt(
-                id_vars='Date', 
+                # CORRECCIÓN CLAVE: Usamos 'Fecha' en lugar de 'Date' para id_vars
+                id_vars='Fecha', 
                 value_vars=['Precio Real', 'GBM', 'Heston', 'Merton'], 
                 var_name='Modelo', 
                 value_name='Precio'
@@ -332,7 +337,7 @@ def main():
             
             fig = px.line(
                 plot_long, 
-                x='Date', 
+                x='Fecha', # CORRECCIÓN: Usamos 'Fecha' en el eje X
                 y='Precio', 
                 color='Modelo', 
                 title=f'Backtesting de Precios de {ticker}',

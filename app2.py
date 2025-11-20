@@ -156,8 +156,6 @@ def backtest_model(df_prices, model_func, model_name, N_paths, T_test_days, **pa
     # 3. Calcular el promedio de las simulaciones
     simulated_mean = np.mean(simulated_paths, axis=1)
     
-    # Asegurarse de que las longitudes coincidan
-    
     # Usamos .values.flatten() para garantizar que sea 1D
     actual_prices = test_prices.values.flatten()
     # Excluimos el punto inicial (S0) que ya está en el set de entrenamiento
@@ -297,26 +295,26 @@ def main():
             st.subheader("4. Visualización de la Predicción (Backtest)")
             
             # ----------------------------------------------------
-            # CORRECCIÓN FINAL: Lógica de datos para evitar AttributeError
+            # CORRECCIÓN FINAL Y ROBUSTA DEL ERROR DE PANDAS
+            # Evita 'to_frame' y construye el DataFrame explícitamente
             # ----------------------------------------------------
 
             # 4.1. Preparar el DataFrame de Precios Reales (Histórico + Test: toda la línea de tiempo)
-            # Convertimos la Serie df_prices a DataFrame y renombramos las columnas
-            real_prices_df = df_prices.to_frame(name='Precio')
-            real_prices_df.index.name = 'Fecha'
-            real_prices_df = real_prices_df.reset_index()
-            real_prices_df['Modelo'] = 'Precio Real'
+            # Método robusto para convertir la Serie a un DataFrame largo
+            real_prices_df = pd.DataFrame({
+                'Fecha': df_prices.index,
+                'Precio': df_prices.values,
+                'Modelo': 'Precio Real'
+            })
             
             # 4.2. Preparar el DataFrame de Precios Simulados (Solo Test)
-            # results_gbm, results_heston, results_merton tienen el índice 'Fecha'
-            
             simulated_df_test = pd.DataFrame({
+                'Fecha': results_gbm.index, # Todos los results_df tienen el mismo índice (test_prices.index)
                 'GBM': results_gbm['Precio Promedio Simulado (GBM)'],
                 'Heston': results_heston['Precio Promedio Simulado (Heston)'],
                 'Merton': results_merton['Precio Promedio Simulado (Merton)']
             })
-            simulated_df_test.index.name = 'Fecha'
-            simulated_df_test = simulated_df_test.reset_index()
+            simulated_df_test = simulated_df_test.reset_index(drop=True) # Resetear índice después de la construcción
 
             # 4.3. Reestructurar el DataFrame de modelos (de ancho a largo)
             simulated_long = simulated_df_test.melt(

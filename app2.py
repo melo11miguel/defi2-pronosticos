@@ -7,8 +7,7 @@ from sklearn.metrics import mean_squared_error
 # --- Configuración de la Aplicación Streamlit ---
 st.set_page_config(layout="wide", page_title="Modelado Financiero y Backtesting")
 
-# --- Funciones de Modelos y Simulación ---
-
+# --- Funciones de Modelos y Simulación (SIN CAMBIOS) ---
 def estimate_gbm_parameters(log_returns):
     """Estima la deriva (mu) y la volatilidad (sigma) para GBM."""
     mu = log_returns.mean()
@@ -92,18 +91,12 @@ def backtest_model(df_prices, model_func, model_name, N_paths, T_test_days, **pa
     """
     
     # 1. Definir el conjunto de entrenamiento (Train) y prueba (Test)
-    # Usaremos los últimos T_test_days como el conjunto de prueba (precios reales)
-    # y los precios anteriores para calibrar y predecir.
-    
     train_prices = df_prices.iloc[:-T_test_days]
     test_prices = df_prices.iloc[-T_test_days:]
     
     S0 = train_prices.iloc[-1] # Precio inicial para la simulación
     
-    # El tiempo total T para la simulación es 1.0 (un año), y N_steps es T_test_days
     # Ajustamos T y N_steps para que el período de backtesting tenga sentido temporalmente.
-    # Si usamos precios diarios, T_test_days son los pasos (N_steps).
-    # Ajustamos T para que T/N_steps sea 1/252 (aproximadamente, para simular en días de trading).
     N_steps = T_test_days
     T = T_test_days / 252.0  # Asumimos 252 días de trading al año
     
@@ -149,20 +142,13 @@ def backtest_model(df_prices, model_func, model_name, N_paths, T_test_days, **pa
         return 0, pd.DataFrame()
         
     # 3. Calcular el promedio de las simulaciones
-    # Calculamos la media de las N_paths para cada paso de tiempo.
     simulated_mean = np.mean(simulated_paths, axis=1)
-    
-    # El primer punto es S0 (el precio de inicio), que ya es el último precio de train_prices.
-    # El RMSE debe comparar la predicción (simulated_mean[1:]) con lo real (test_prices)
     
     # Asegurarse de que las longitudes coincidan
     actual_prices = test_prices.values
     predicted_prices = simulated_mean[1:] 
     
     if len(actual_prices) != len(predicted_prices):
-        # Esto puede ocurrir si hay un problema con la indexación. 
-        # Si la simulación tiene N_steps+1 puntos (incluyendo S0),
-        # y test_prices tiene N_steps puntos.
         min_len = min(len(actual_prices), len(predicted_prices))
         actual_prices = actual_prices[:min_len]
         predicted_prices = predicted_prices[:min_len]
@@ -180,7 +166,7 @@ def backtest_model(df_prices, model_func, model_name, N_paths, T_test_days, **pa
     return rmse, results_df
 
 
-# --- Función Principal de Streamlit ---
+# --- Función Principal de Streamlit (MODIFICADA LA SECCIÓN DE DESCARGA) ---
 
 def main():
     st.title("💸 Modelado de Precios de Activos y Backtesting")
@@ -196,7 +182,9 @@ def main():
         
         # 2. Configuración de Datos
         start_date = st.date_input("Fecha de Inicio de Datos", pd.to_datetime("2020-01-01"))
-        end_date = st.date_input("Fecha de Fin de Datos", pd.to_datetime("today"))
+        # Usamos today - 1 día como sugerencia para evitar problemas con la descarga
+        yesterday = pd.to_datetime("today") - pd.Timedelta(days=1)
+        end_date = st.date_input("Fecha de Fin de Datos", yesterday)
         
         # 3. Configuración del Backtesting
         st.subheader("Configuración de Simulación")
@@ -224,18 +212,36 @@ def main():
             
             # --- 1. Descarga de Datos ---
             st.subheader(f"1. Descarga de Datos: {ticker}")
+            
+            # Usamos un bloque try/except más específico para el error de 'Adj Close'
             try:
                 # Descargar datos de cierre ajustado
-                data = yf.download(ticker, start=start_date, end=end_date)
+                data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+
+                # Verificar si el DataFrame está vacío
                 if data.empty:
-                    st.error(f"No se encontraron datos para el ticker {ticker} en el rango de fechas especificado.")
+                    st.error(f"No se encontraron datos históricos para el ticker {ticker} entre {start_date} y {end_date}. Intente con un rango de fechas diferente.")
                     return
 
-                df_prices = data['Adj Close']
+                # Acceder a la columna 'Adj Close' y verificar su existencia
+                if 'Adj Close' not in data.columns:
+                     st.error(f"Error: La columna 'Adj Close' no se encontró en los datos descargados. Verifique el ticker y el rango de fechas.")
+                     return
+                     
+                df_prices = data['Adj Close'].dropna()
+
+                if df_prices.empty:
+                    st.error(f"Error: La columna 'Adj Close' está vacía después de limpiar valores nulos. Revise las fechas y el ticker.")
+                    return
+
                 st.write("Primeras 5 filas de precios de cierre ajustados:")
                 st.dataframe(df_prices.head())
                 
-                # Definir conjuntos de entrenamiento y prueba para visualización
+                # Definir conjuntos de entrenamiento y prueba para backtesting
+                if len(df_prices) <= test_days:
+                    st.error(f"Error: No hay suficientes datos ({len(df_prices)} puntos) para realizar un backtesting de {test_days} días.")
+                    return
+                
                 train_prices = df_prices.iloc[:-test_days]
                 test_prices = df_prices.iloc[-test_days:]
 
@@ -312,5 +318,4 @@ def main():
             st.caption(f"El Backtest compara el precio real vs. el precio promedio simulado para los últimos {test_days} días.")
 
 if __name__ == "__main__":
-    # La autenticación de Firebase no se aplica aquí, es una aplicación Streamlit.
     main()

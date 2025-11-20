@@ -9,7 +9,7 @@ from datetime import date, timedelta
 # CONFIGURACIÓN GENERAL
 # =========================================================
 st.set_page_config(
-    page_title="Modelos GBM - Heston - Merton",
+    page_title="Simulación y Backtesting: GBM, Heston, Merton",
     layout="wide"
 )
 
@@ -24,19 +24,14 @@ st.markdown(
 # =========================================================
 @st.cache_data
 def download_prices(ticker: str, start: str, end: str) -> pd.Series | None:
-    """
-    Descarga precios de Yahoo Finance y devuelve la serie de 'Adj Close' (o similar).
-    """
     data = yf.download(ticker, start=start, end=end)
     if data.empty:
         return None
-
     for col in ["Adj Close", "Close", "close", "adjclose"]:
         if col in data.columns:
             s = data[col].dropna()
             if not s.empty:
                 return s.astype(float)
-
     return None
 
 
@@ -47,11 +42,7 @@ def compute_log_returns(prices: pd.Series) -> pd.Series:
 def train_test_split_series(series: pd.Series, test_size: float = 0.2):
     n = len(series)
     n_test = int(n * test_size)
-    if n_test < 5:
-        n_test = 5
-    if n_test >= n:
-        n_test = max(1, n - 1)
-
+    n_test = max(5, min(n - 1, n_test))  # al menos 5 puntos de test
     train = series.iloc[:-n_test]
     test = series.iloc[-n_test:]
     return train, test
@@ -67,16 +58,14 @@ def compute_rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 # MODELO GBM
 # =========================================================
 def estimate_gbm_params(prices: pd.Series):
-    """
-    Estima mu y sigma anuales de un GBM a partir de retornos log diarios.
-    """
     r = compute_log_returns(prices)
+    if r.std() == 0 or len(r) < 2:
+        # fallback si la serie es rara
+        return 0.0, 0.2
     mu_daily = r.mean()
     sigma_daily = r.std()
-
     mu_annual = mu_daily * 252
     sigma_annual = sigma_daily * np.sqrt(252)
-
     return mu_annual, sigma_annual
 
 
@@ -85,7 +74,6 @@ def simulate_gbm_paths(S0: float, mu: float, sigma: float,
     np.random.seed(seed)
     S = np.zeros((n_steps + 1, n_paths))
     S[0, :] = S0
-
     mu_dt = (mu - 0.5 * sigma ** 2) * dt
     sigma_sqrt_dt = sigma * np.sqrt(dt)
 
@@ -97,36 +85,31 @@ def simulate_gbm_paths(S0: float, mu: float, sigma: float,
 
 
 # =========================================================
-# MODELO MERTON (JUMP DIFFUSION)
+# MODELO MERTON
 # =========================================================
 def estimate_merton_params(prices: pd.Series,
                            jump_threshold_sigma: float = 3.0):
-    """
-    Estimación muy simple para Merton:
-    - mu y sigma del componente continuo (como GBM)
-    - lambda, mu_J, sigma_J para saltos usando un umbral de sigma.
-    """
     r = compute_log_returns(prices)
+    if r.std() == 0 or len(r) < 2:
+        return 0.0, 0.2, 0.1, 0.0, 0.01
+
     mu_daily = r.mean()
     sigma_daily = r.std()
 
-    # Estimación de GBM
     mu_annual = mu_daily * 252
     sigma_annual = sigma_daily * np.sqrt(252)
 
-    # Detección de saltos
     z_scores = (r - mu_daily) / sigma_daily
     jumps = r[np.abs(z_scores) > jump_threshold_sigma]
 
     n_days = len(r)
-    years = n_days / 252
+    years = n_days / 252.0
 
     if len(jumps) > 0 and years > 0:
-        lam = len(jumps) / years  # intensidad anual
-        mu_J = jumps.mean()       # tamaño medio del salto (en retornos diarios)
+        lam = len(jumps) / years
+        mu_J = jumps.mean()
         sigma_J = jumps.std() if len(jumps) > 1 else 0.01
     else:
-        # Si no detecta saltos, ponemos valores pequeños
         lam = 0.1
         mu_J = 0.0
         sigma_J = 0.01
@@ -148,22 +131,17 @@ def simulate_merton_paths(S0: float,
     S = np.zeros((n_steps + 1, n_paths))
     S[0, :] = S0
 
-    # Drif corregido por componente de saltos
     drift = (mu - 0.5 * sigma ** 2 - lam * mu_J) * dt
     diff_coeff = sigma * np.sqrt(dt)
 
     for t in range(1, n_steps + 1):
-        # Difusión
         z = np.random.normal(size=n_paths)
         dW = diff_coeff * z
 
-        # Saltos (Poisson)
         N = np.random.poisson(lam * dt, size=n_paths)
         J = np.zeros(n_paths)
-        # Si hay saltos, sumamos Normal(mu_J, sigma_J) N veces
         mask_jumps = N > 0
         if np.any(mask_jumps):
-            # Para cada camino con N>0, suma de N Normales ~ Normal(N*mu_J, sqrt(N)*sigma_J)
             Nj = N[mask_jumps]
             J[mask_jumps] = np.random.normal(
                 loc=Nj * mu_J,
@@ -180,28 +158,21 @@ def simulate_merton_paths(S0: float,
 # MODELO HESTON
 # =========================================================
 def estimate_heston_params(prices: pd.Series):
-    """
-    Estimación muy simplificada para Heston:
-    - mu anual: como GBM
-    - v0, theta: varianza media
-    - kappa, xi, rho: parámetros fijos razonables
-    Esta parte se puede sofisticar más si lo necesitas.
-    """
     r = compute_log_returns(prices)
-    mu_daily = r.mean()
-    sigma_daily = r.std()
+    if r.std() == 0 or len(r) < 2:
+        # parámetros por defecto
+        mu_annual = 0.0
+        v0 = 0.04
+    else:
+        mu_daily = r.mean()
+        sigma_daily = r.std()
+        mu_annual = mu_daily * 252
+        v0 = sigma_daily ** 2
 
-    mu_annual = mu_daily * 252
-
-    var_daily = sigma_daily ** 2
-    v0 = var_daily
-    theta = var_daily  # varianza de largo plazo ~ varianza histórica
-
-    # Parámetros "típicos"
-    kappa = 1.5   # velocidad de reversión
-    xi = 0.5      # vol-of-vol
-    rho = -0.7    # correlación negativa
-
+    theta = v0
+    kappa = 1.5
+    xi = 0.5
+    rho = -0.7
     return mu_annual, v0, kappa, theta, xi, rho
 
 
@@ -219,24 +190,20 @@ def simulate_heston_paths(S0: float,
     np.random.seed(seed)
     S = np.zeros((n_steps + 1, n_paths))
     v = np.zeros((n_steps + 1, n_paths))
-
     S[0, :] = S0
-    v[0, :] = v0
+    v[0, :] = max(v0, 1e-8)
 
     for t in range(1, n_steps + 1):
         z1 = np.random.normal(size=n_paths)
         z2 = np.random.normal(size=n_paths)
 
-        # Brownianos correlacionados
         dW_v = np.sqrt(dt) * z2
         dW_s = np.sqrt(dt) * (rho * z2 + np.sqrt(1 - rho ** 2) * z1)
 
-        # Full truncation para varianza
         v_prev = np.clip(v[t - 1, :], 1e-8, None)
 
         dv = kappa * (theta - v_prev) * dt + xi * np.sqrt(v_prev) * dW_v
-        v_t = v_prev + dv
-        v_t = np.clip(v_t, 1e-8, None)
+        v_t = np.clip(v_prev + dv, 1e-8, None)
 
         dS = (mu - 0.5 * v_prev) * dt + np.sqrt(v_prev) * dW_s
         S[t, :] = S[t - 1, :] * np.exp(dS)
@@ -249,24 +216,17 @@ def simulate_heston_paths(S0: float,
 # GRÁFICO DE ABANICO
 # =========================================================
 def make_fan_chart(test_index, S_paths, real_prices, title: str):
-    """
-    Genera una figura de abanico (percentiles) y serie real.
-    S_paths: matriz (n_steps+1, n_paths) -> ignoramos t=0 para backtest.
-    """
     n_steps = S_paths.shape[0] - 1
+    if n_steps <= 0:
+        raise ValueError("Muy pocos pasos para el backtest.")
 
-    # Percentiles al nivel de cada tiempo
     percentiles = np.percentile(S_paths[1:, :], [5, 25, 50, 75, 95], axis=1)
-    p5, p25, p50, p75, p95 = percentiles
+    p5, p25, p50, p75, p95 = percentiles  # (n_steps,)
 
     fig, ax = plt.subplots(figsize=(10, 5))
-
-    # Abanico
     ax.fill_between(test_index, p5, p95, alpha=0.2, label="5%-95%")
     ax.fill_between(test_index, p25, p75, alpha=0.4, label="25%-75%")
     ax.plot(test_index, p50, label="Mediana simulada", linewidth=2)
-
-    # Serie real
     ax.plot(test_index, real_prices.values, label="Precio real", linewidth=2)
 
     ax.set_title(title)
@@ -274,14 +234,12 @@ def make_fan_chart(test_index, S_paths, real_prices, title: str):
     ax.set_ylabel("Precio")
     ax.legend()
     ax.grid(True, alpha=0.3)
-
     return fig
 
 
 # =========================================================
-# INTERFAZ DE LA APP
+# SIDEBAR: PARÁMETROS DE USUARIO
 # =========================================================
-# Sidebar: parámetros de usuario
 st.sidebar.header("Parámetros de simulación")
 
 default_end = date.today()
@@ -299,6 +257,29 @@ n_paths = st.sidebar.slider("Número de trayectorias simuladas",
 
 st.sidebar.markdown("dt = 1/252 (supuesto de datos diarios)")
 
+# Parámetros manuales
+with st.sidebar.expander("Parámetros GBM (opcionales)", expanded=False):
+    use_manual_gbm = st.checkbox("Usar parámetros manuales GBM", value=False)
+    mu_gbm_manual = st.number_input("mu anual GBM", value=0.10, format="%.5f")
+    sigma_gbm_manual = st.number_input("sigma anual GBM", value=0.20, min_value=0.0001, format="%.5f")
+
+with st.sidebar.expander("Parámetros Merton (opcionales)", expanded=False):
+    use_manual_merton = st.checkbox("Usar parámetros manuales Merton", value=False)
+    lam_manual = st.number_input("lambda (intensidad saltos)", value=0.10, min_value=0.0, format="%.5f")
+    mu_J_manual = st.number_input("mu_J (tamaño medio salto)", value=0.00, format="%.5f")
+    sigma_J_manual = st.number_input("sigma_J (vol salto)", value=0.05, min_value=0.0001, format="%.5f")
+
+with st.sidebar.expander("Parámetros Heston (opcionales)", expanded=False):
+    use_manual_heston = st.checkbox("Usar parámetros manuales Heston", value=False)
+    v0_manual = st.number_input("v0 (var inicial)", value=0.04, min_value=0.000001, format="%.6f")
+    kappa_manual = st.number_input("kappa (vel. reversión)", value=1.50, min_value=0.0001, format="%.5f")
+    theta_manual = st.number_input("theta (var largo plazo)", value=0.04, min_value=0.000001, format="%.6f")
+    xi_manual = st.number_input("xi (vol-of-vol)", value=0.50, min_value=0.0001, format="%.5f")
+    rho_manual = st.number_input("rho (correlación)", value=-0.70, min_value=-0.99, max_value=0.99, format="%.3f")
+
+# =========================================================
+# EJECUCIÓN
+# =========================================================
 if st.sidebar.button("Ejecutar modelos"):
     if start_date >= end_date:
         st.error("La fecha de inicio debe ser anterior a la fecha de fin.")
@@ -318,6 +299,10 @@ if st.sidebar.button("Ejecutar modelos"):
     st.line_chart(prices)
 
     train_prices, test_prices = train_test_split_series(prices, test_size=test_size)
+    if len(test_prices) < 5:
+        st.error("Muy pocos datos en el conjunto de prueba.")
+        st.stop()
+
     st.write(f"Datos de entrenamiento: {train_prices.index[0].date()} – {train_prices.index[-1].date()}")
     st.write(f"Datos de prueba (backtest): {test_prices.index[0].date()} – {test_prices.index[-1].date()}")
     st.write(f"Número de observaciones (train/test): {len(train_prices)} / {len(test_prices)}")
@@ -332,7 +317,13 @@ if st.sidebar.button("Ejecutar modelos"):
     # GBM
     # -----------------------------------------------------
     try:
-        mu_gbm, sigma_gbm = estimate_gbm_params(train_prices)
+        mu_gbm_est, sigma_gbm_est = estimate_gbm_params(train_prices)
+        mu_gbm = mu_gbm_manual if use_manual_gbm else mu_gbm_est
+        sigma_gbm = sigma_gbm_manual if use_manual_gbm else sigma_gbm_est
+
+        st.write(f"GBM - mu estimado: {mu_gbm_est:.4f}, sigma estimado: {sigma_gbm_est:.4f} "
+                 f"{'(usando valores manuales)' if use_manual_gbm else ''}")
+
         S_gbm = simulate_gbm_paths(
             S0=S0,
             mu=mu_gbm,
@@ -351,11 +342,7 @@ if st.sidebar.button("Ejecutar modelos"):
             real_prices=test_prices,
             title=f"Abanico GBM - {ticker}"
         )
-
-        results["GBM"] = {
-            "rmse": rmse_gbm,
-            "fig": fig_gbm
-        }
+        results["GBM"] = {"rmse": rmse_gbm, "fig": fig_gbm}
     except Exception as e:
         st.error(f"Error en el modelo GBM: {e}")
 
@@ -363,11 +350,21 @@ if st.sidebar.button("Ejecutar modelos"):
     # MERTON
     # -----------------------------------------------------
     try:
-        mu_mer, sigma_mer, lam_mer, mu_J_mer, sigma_J_mer = estimate_merton_params(train_prices)
+        mu_mer_est, sigma_mer_est, lam_est, mu_J_est, sigma_J_est = estimate_merton_params(train_prices)
+        lam_mer = lam_manual if use_manual_merton else lam_est
+        mu_J_mer = mu_J_manual if use_manual_merton else mu_J_est
+        sigma_J_mer = sigma_J_manual if use_manual_merton else sigma_J_est
+
+        st.write(
+            f"Merton - mu estimado: {mu_mer_est:.4f}, sigma estimado: {sigma_mer_est:.4f}, "
+            f"lambda estimado: {lam_est:.4f}, mu_J estimado: {mu_J_est:.4f}, sigma_J estimado: {sigma_J_est:.4f} "
+            f"{'(usando valores manuales)' if use_manual_merton else ''}"
+        )
+
         S_mer = simulate_merton_paths(
             S0=S0,
-            mu=mu_mer,
-            sigma=sigma_mer,
+            mu=mu_mer_est,
+            sigma=sigma_mer_est,
             lam=lam_mer,
             mu_J=mu_J_mer,
             sigma_J=sigma_J_mer,
@@ -385,11 +382,7 @@ if st.sidebar.button("Ejecutar modelos"):
             real_prices=test_prices,
             title=f"Abanico Merton - {ticker}"
         )
-
-        results["Merton"] = {
-            "rmse": rmse_mer,
-            "fig": fig_mer
-        }
+        results["Merton"] = {"rmse": rmse_mer, "fig": fig_mer}
     except Exception as e:
         st.error(f"Error en el modelo Merton: {e}")
 
@@ -397,10 +390,23 @@ if st.sidebar.button("Ejecutar modelos"):
     # HESTON
     # -----------------------------------------------------
     try:
-        mu_h, v0_h, kappa_h, theta_h, xi_h, rho_h = estimate_heston_params(train_prices)
+        mu_h_est, v0_est, kappa_est, theta_est, xi_est, rho_est = estimate_heston_params(train_prices)
+        v0_h = v0_manual if use_manual_heston else v0_est
+        kappa_h = kappa_manual if use_manual_heston else kappa_est
+        theta_h = theta_manual if use_manual_heston else theta_est
+        xi_h = xi_manual if use_manual_heston else xi_est
+        rho_h = rho_manual if use_manual_heston else rho_est
+
+        st.write(
+            f"Heston - mu estimado: {mu_h_est:.4f}, v0 estimado: {v0_est:.6f}, "
+            f"kappa estimado: {kappa_est:.4f}, theta estimado: {theta_est:.6f}, "
+            f"xi estimado: {xi_est:.4f}, rho estimado: {rho_est:.3f} "
+            f"{'(usando valores manuales)' if use_manual_heston else ''}"
+        )
+
         S_h, v_h = simulate_heston_paths(
             S0=S0,
-            mu=mu_h,
+            mu=mu_h_est,
             v0=v0_h,
             kappa=kappa_h,
             theta=theta_h,
@@ -420,16 +426,12 @@ if st.sidebar.button("Ejecutar modelos"):
             real_prices=test_prices,
             title=f"Abanico Heston - {ticker}"
         )
-
-        results["Heston"] = {
-            "rmse": rmse_h,
-            "fig": fig_h
-        }
+        results["Heston"] = {"rmse": rmse_h, "fig": fig_h}
     except Exception as e:
         st.error(f"Error en el modelo Heston: {e}")
 
     # =====================================================
-    # MOSTRAR RESULTADOS
+    # RESULTADOS
     # =====================================================
     if not results:
         st.error("Ningún modelo pudo ejecutarse.")
@@ -444,16 +446,11 @@ if st.sidebar.button("Ejecutar modelos"):
     best_model = rmse_table.index[0]
     st.success(f"Mejor modelo según RMSE: **{best_model}**")
 
-    # Gráficos de abanico
     st.subheader("Abanicos de simulación vs. precios reales")
-
     cols = st.columns(len(results))
     for col, (name, info) in zip(cols, results.items()):
         with col:
             st.markdown(f"#### {name}")
             st.pyplot(info["fig"])
-
 else:
     st.info("Configura los parámetros en el sidebar y pulsa **'Ejecutar modelos'**.")
-
-

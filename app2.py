@@ -296,32 +296,37 @@ def main():
             st.markdown("---")
             st.subheader("4. Visualización de la Predicción (Backtest)")
             
-            # 4.1. Preparar datos de entrenamiento (históricos)
-            train_plot = pd.DataFrame(train_prices)
-            train_plot.columns = ['Precio Real']
-            # Aseguramos que el índice histórico se llame 'Fecha' para la consistencia
-            train_plot.index.name = 'Fecha' 
+            # ----------------------------------------------------
+            # CORRECCIÓN DE LA LÓGICA DE DATOS PARA EL GRÁFICO
+            # ----------------------------------------------------
 
-            # 4.2. Combinar los resultados simulados y reales (solo la parte del test)
-            combined_df_test = results_gbm.join(results_heston.iloc[:, 1]).join(results_merton.iloc[:, 1])
-            combined_df_test.columns = ['Precio Real', 'GBM', 'Heston', 'Merton']
+            # 4.1. Preparar el DataFrame de Precios Reales (Histórico + Test: toda la línea de tiempo)
+            # Renombramos el índice y la columna para que se ajusten al formato largo
+            real_prices_df = df_prices.reset_index().rename(columns={df_prices.name: 'Precio', 'Date': 'Fecha'})
+            real_prices_df['Modelo'] = 'Precio Real'
+            real_prices_df = real_prices_df[['Fecha', 'Modelo', 'Precio']]
             
-            # 4.3. Renombramos la columna del histórico para evitar duplicados al concatenar
-            train_plot.columns = ['Real (Histórico)']
+            # 4.2. Preparar el DataFrame de Precios Simulados (Solo Test)
+            # combined_df_test tiene 'Precio Real', 'GBM', 'Heston', 'Merton' para el período de prueba.
+            # Extraemos solo los modelos (columnas 1, 3, 5 del join original, que son 1, 2, 3 en combined_df_test)
+            # y mantenemos el índice de fechas (reset_index)
+            simulated_df_test = combined_df_test[['GBM', 'Heston', 'Merton']].reset_index()
 
-            # 4.4. Unir el histórico y el test simulado
-            plot_df = pd.concat([train_plot, combined_df_test.drop(columns=['Precio Real'])], axis=0)
-
-            # 4.5. Renombrar para claridad
-            plot_df = plot_df.rename(columns={'Real (Histórico)': 'Precio Real'})
-            
-            # 4.6. Reestructurar el DataFrame de ancho a largo para Plotly
-            plot_long = plot_df.reset_index().melt(
+            # 4.3. Reestructurar el DataFrame de modelos (de ancho a largo)
+            simulated_long = simulated_df_test.melt(
                 id_vars='Fecha', 
-                value_vars=['Precio Real', 'GBM', 'Heston', 'Merton'], 
+                value_vars=['GBM', 'Heston', 'Merton'], 
                 var_name='Modelo', 
                 value_name='Precio'
-            ).dropna()
+            ).dropna(subset=['Precio']) 
+
+            # 4.4. Concatenar los precios reales (toda la línea de tiempo) y los simulados (solo el test)
+            plot_long = pd.concat([real_prices_df, simulated_long], ignore_index=True)
+            
+            # ----------------------------------------------------
+            # FIN DE LA CORRECCIÓN DE LÓGICA
+            # ----------------------------------------------------
+
 
             # --- Generar el Gráfico Interactivo con Plotly ---
             
@@ -347,14 +352,13 @@ def main():
             split_date = test_prices.index[0]
             split_date_str = split_date.strftime('%Y-%m-%d')
             
-            # SOLUCIÓN FINAL: Se dibuja la línea sin anotación y la anotación se añade por separado
             # 1. Dibuja la línea vertical
             fig.add_vline(x=split_date_str, xref="x", line_width=2, line_dash="dash", line_color="red")
             
-            # 2. Añade la anotación (el texto) por separado
+            # 2. Añade la anotación (el texto) por separado para evitar el TypeError
             fig.add_annotation(
                 x=split_date_str,
-                y=1.0,  # Colócala en la parte superior del gráfico (1.0 = top)
+                y=0.98,  # Ajustado ligeramente por debajo del tope (1.0 = top)
                 yref='paper', # 'paper' se refiere a las coordenadas del gráfico, no del eje Y
                 text="Inicio del Backtest",
                 showarrow=False,

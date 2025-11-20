@@ -299,12 +299,11 @@ def main():
             # 4.1. Preparar datos de entrenamiento (históricos)
             train_plot = pd.DataFrame(train_prices)
             train_plot.columns = ['Precio Real']
-            # CORRECCIÓN: Aseguramos que el índice histórico se llame 'Fecha' para la consistencia
+            # Aseguramos que el índice histórico se llame 'Fecha' para la consistencia
             train_plot.index.name = 'Fecha' 
 
             # 4.2. Combinar los resultados simulados y reales (solo la parte del test)
             combined_df_test = results_gbm.join(results_heston.iloc[:, 1]).join(results_merton.iloc[:, 1])
-            # La columna 'Precio Real' en combined_df_test es el precio real en el periodo de test
             combined_df_test.columns = ['Precio Real', 'GBM', 'Heston', 'Merton']
             
             # 4.3. Renombramos la columna del histórico para evitar duplicados al concatenar
@@ -318,7 +317,6 @@ def main():
             
             # 4.6. Reestructurar el DataFrame de ancho a largo para Plotly
             plot_long = plot_df.reset_index().melt(
-                # CORRECCIÓN CLAVE: Usamos 'Fecha' en lugar de 'Date' para id_vars
                 id_vars='Fecha', 
                 value_vars=['Precio Real', 'GBM', 'Heston', 'Merton'], 
                 var_name='Modelo', 
@@ -337,7 +335,7 @@ def main():
             
             fig = px.line(
                 plot_long, 
-                x='Fecha', # CORRECCIÓN: Usamos 'Fecha' en el eje X
+                x='Fecha', 
                 y='Precio', 
                 color='Modelo', 
                 title=f'Backtesting de Precios de {ticker}',
@@ -347,7 +345,10 @@ def main():
             
             # Añadir una línea vertical para separar la zona de entrenamiento/test
             split_date = test_prices.index[0]
-            fig.add_vline(x=split_date, line_width=2, line_dash="dash", line_color="red", 
+            # CORRECCIÓN CLAVE: Convertir la fecha de inicio del backtest a string
+            split_date_str = split_date.strftime('%Y-%m-%d')
+            
+            fig.add_vline(x=split_date_str, line_width=2, line_dash="dash", line_color="red", 
                           annotation_text="Inicio del Backtest", 
                           annotation_position="top right")
 

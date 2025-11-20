@@ -297,20 +297,26 @@ def main():
             st.subheader("4. Visualización de la Predicción (Backtest)")
             
             # ----------------------------------------------------
-            # CORRECCIÓN DE LA LÓGICA DE DATOS PARA EL GRÁFICO
+            # CORRECCIÓN FINAL: Lógica de datos para evitar AttributeError
             # ----------------------------------------------------
 
             # 4.1. Preparar el DataFrame de Precios Reales (Histórico + Test: toda la línea de tiempo)
-            # Renombramos el índice y la columna para que se ajusten al formato largo
-            real_prices_df = df_prices.reset_index().rename(columns={df_prices.name: 'Precio', 'Date': 'Fecha'})
+            # Convertimos la Serie df_prices a DataFrame y renombramos las columnas
+            real_prices_df = df_prices.to_frame(name='Precio')
+            real_prices_df.index.name = 'Fecha'
+            real_prices_df = real_prices_df.reset_index()
             real_prices_df['Modelo'] = 'Precio Real'
-            real_prices_df = real_prices_df[['Fecha', 'Modelo', 'Precio']]
             
             # 4.2. Preparar el DataFrame de Precios Simulados (Solo Test)
-            # combined_df_test tiene 'Precio Real', 'GBM', 'Heston', 'Merton' para el período de prueba.
-            # Extraemos solo los modelos (columnas 1, 3, 5 del join original, que son 1, 2, 3 en combined_df_test)
-            # y mantenemos el índice de fechas (reset_index)
-            simulated_df_test = combined_df_test[['GBM', 'Heston', 'Merton']].reset_index()
+            # results_gbm, results_heston, results_merton tienen el índice 'Fecha'
+            
+            simulated_df_test = pd.DataFrame({
+                'GBM': results_gbm['Precio Promedio Simulado (GBM)'],
+                'Heston': results_heston['Precio Promedio Simulado (Heston)'],
+                'Merton': results_merton['Precio Promedio Simulado (Merton)']
+            })
+            simulated_df_test.index.name = 'Fecha'
+            simulated_df_test = simulated_df_test.reset_index()
 
             # 4.3. Reestructurar el DataFrame de modelos (de ancho a largo)
             simulated_long = simulated_df_test.melt(
@@ -355,7 +361,7 @@ def main():
             # 1. Dibuja la línea vertical
             fig.add_vline(x=split_date_str, xref="x", line_width=2, line_dash="dash", line_color="red")
             
-            # 2. Añade la anotación (el texto) por separado para evitar el TypeError
+            # 2. Añade la anotación (el texto) por separado
             fig.add_annotation(
                 x=split_date_str,
                 y=0.98,  # Ajustado ligeramente por debajo del tope (1.0 = top)

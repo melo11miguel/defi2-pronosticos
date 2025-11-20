@@ -45,10 +45,11 @@ def backtest_gbm(prices_train, prices_test, n_paths=1000, seed=42):
     train_arr = prices_train.values.astype(float)
     test_arr = prices_test.values.astype(float)
 
+    # Log-returns diarios
     log_ret = np.log(train_arr[1:] / train_arr[:-1])
-    mu = log_ret.mean() * 252
-    sigma = log_ret.std() * np.sqrt(252)
-    dt = 1 / 252
+    mu = np.mean(log_ret)      # media diaria
+    sigma = np.std(log_ret)    # volatilidad diaria
+    dt = 1                     # un día
 
     S0 = float(train_arr[-1])
     n_steps = len(test_arr)
@@ -57,16 +58,32 @@ def backtest_gbm(prices_train, prices_test, n_paths=1000, seed=42):
     Z = rng.standard_normal((n_paths, n_steps))
 
     S_paths = np.zeros((n_paths, n_steps))
-    S_paths[:, 0] = S0 * np.exp((mu - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * Z[:, 0])
+    S_paths[:, 0] = S0
 
     for t in range(1, n_steps):
         S_paths[:, t] = (
             S_paths[:, t-1] *
-            np.exp((mu - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * Z[:, t])
+            np.exp((mu - 0.5 * sigma**2)*dt + sigma*np.sqrt(dt)*Z[:, t])
         )
 
+    # Pred de la media
     preds = S_paths.mean(axis=0)
-    return preds, compute_rmse(test_arr, preds), {"mu": mu, "sigma": sigma}
+
+    # RMSE de cada trayectoria
+    rmse_paths = np.sqrt(np.mean((S_paths - test_arr.reshape(1, -1))**2, axis=1))
+
+    best_idx = rmse_paths.argmin()
+    best_traj = S_paths[best_idx]
+
+    return {
+        "paths": S_paths,
+        "mean": preds,
+        "rmse_mean": compute_rmse(test_arr, preds),
+        "rmse_each": rmse_paths,
+        "best_traj": best_traj,
+        "params": {"mu_daily": mu, "sigma_daily": sigma}
+    }
+
 
 
 # =========================================================

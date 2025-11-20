@@ -345,13 +345,24 @@ def main():
             
             # Añadir una línea vertical para separar la zona de entrenamiento/test
             split_date = test_prices.index[0]
-            # CORRECCIÓN FINAL: Convertir la fecha de inicio del backtest a string y especificar xref="x"
             split_date_str = split_date.strftime('%Y-%m-%d')
             
-            fig.add_vline(x=split_date_str, xref="x", line_width=2, line_dash="dash", line_color="red", 
-                          annotation_text="Inicio del Backtest", 
-                          annotation_position="top right")
-
+            # SOLUCIÓN FINAL: Se dibuja la línea sin anotación y la anotación se añade por separado
+            # 1. Dibuja la línea vertical
+            fig.add_vline(x=split_date_str, xref="x", line_width=2, line_dash="dash", line_color="red")
+            
+            # 2. Añade la anotación (el texto) por separado
+            fig.add_annotation(
+                x=split_date_str,
+                y=1.0,  # Colócala en la parte superior del gráfico (1.0 = top)
+                yref='paper', # 'paper' se refiere a las coordenadas del gráfico, no del eje Y
+                text="Inicio del Backtest",
+                showarrow=False,
+                font=dict(color="red", size=10),
+                bgcolor="rgba(255, 255, 255, 0.7)",
+                xanchor="left",
+            )
+            
             # Mejorar el layout para el contexto financiero
             fig.update_layout(
                 xaxis_title="Fecha",

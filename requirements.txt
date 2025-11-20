@@ -1,6 +1,8 @@
-streamlit==1.36.0
+
 matplotlib
 pandas
 numpy
 yfinance
 scipy
+streamlit
+scikit-learn

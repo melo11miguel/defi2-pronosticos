@@ -38,18 +38,18 @@ def compute_rmse(y_true, y_pred):
 
 
 # =========================================================
-# MODELO 1: GBM (VOLATILIDAD DIARIA REAL)
+# MODELO 1: GBM (VOLATILIDAD DIARIA)
 # =========================================================
 def backtest_gbm(prices_train, prices_test, n_paths=1000, seed=42):
 
     train_arr = prices_train.values.astype(float)
     test_arr = prices_test.values.astype(float)
 
-    # Volatilidad diaria real
+    # Log-retornos DIARIOS
     log_ret = np.log(train_arr[1:] / train_arr[:-1])
-    mu = np.mean(log_ret)
-    sigma = np.std(log_ret)
-    dt = 1  # 1 día
+    mu = np.mean(log_ret)         # media diaria
+    sigma = np.std(log_ret)       # volatilidad diaria
+    dt = 1                        # un día
 
     S0 = float(train_arr[-1])
     n_steps = len(test_arr)
@@ -69,7 +69,6 @@ def backtest_gbm(prices_train, prices_test, n_paths=1000, seed=42):
 
     preds = S_paths.mean(axis=0)
 
-    # RMSE de cada camino
     rmse_paths = np.sqrt(np.mean((S_paths - test_arr.reshape(1, -1))**2, axis=1))
     best_idx = rmse_paths.argmin()
     best_traj = S_paths[best_idx]
@@ -85,20 +84,22 @@ def backtest_gbm(prices_train, prices_test, n_paths=1000, seed=42):
 
 
 # =========================================================
-# MODELO 2: HESTON (VOLATILIDAD DIARIA)
+# MODELO 2: HESTON (DIARIO)
 # =========================================================
 def backtest_heston(prices_train, prices_test,
-                    kappa=2.0, theta_factor=1.0, sigma_v=0.5, rho=-0.7,
+                    kappa=2.0, theta_factor=1.0, sigma_v=0.3, rho=-0.7,
                     n_paths=1000, seed=123):
 
     train_arr = prices_train.values.astype(float)
     test_arr = prices_test.values.astype(float)
 
+    # Parámetros diarios
     log_ret = np.log(train_arr[1:] / train_arr[:-1])
-    mu = np.mean(log_ret)
-    v0 = np.var(log_ret)
-    theta = theta_factor * v0
-    dt = 1
+    mu = np.mean(log_ret)              # media diaria
+    sigma = np.std(log_ret)           # vol diaria
+    v0 = sigma**2                     # varianza diaria inicial
+    theta = theta_factor * v0         # nivel de largo plazo
+    dt = 1                            # paso 1 día
 
     S0 = float(train_arr[-1])
     n_steps = len(test_arr)
@@ -117,43 +118,46 @@ def backtest_heston(prices_train, prices_test,
     for t in range(1, n_steps):
         v_prev = np.maximum(v_paths[:, t-1], 1e-8)
 
+        # Full truncation Euler para mantener v_t >= 0
         v_paths[:, t] = (
-            v_prev +
-            kappa * (theta - v_prev) * dt +
-            sigma_v * np.sqrt(v_prev * dt) * Z2[:, t]
+            v_prev
+            + kappa * (theta - v_prev) * dt
+            + sigma_v * np.sqrt(v_prev * dt) * Z2[:, t]
         )
-
         v_paths[:, t] = np.maximum(v_paths[:, t], 1e-8)
 
         S_paths[:, t] = (
             S_paths[:, t-1] *
-            np.exp((mu - 0.5*v_paths[:, t]) * dt +
-                   np.sqrt(v_paths[:, t] * dt) * Z1[:, t])
+            np.exp(
+                (mu - 0.5 * v_paths[:, t]) * dt +
+                np.sqrt(v_paths[:, t] * dt) * Z1[:, t]
+            )
         )
 
     preds = S_paths.mean(axis=0)
 
     rmse_paths = np.sqrt(np.mean((S_paths - test_arr.reshape(1, -1))**2, axis=1))
+    best_idx = rmse_paths.argmin()
 
     return {
         "paths": S_paths,
         "mean": preds,
         "rmse_mean": compute_rmse(test_arr, preds),
         "rmse_each": rmse_paths,
-        "best_traj": S_paths[np.argmin(rmse_paths)],
+        "best_traj": S_paths[best_idx],
         "params": {
             "mu_daily": mu,
+            "sigma_daily": sigma,
             "v0_daily": v0,
-            "kappa": kappa,
             "theta_daily": theta,
+            "kappa": kappa,
             "sigma_v": sigma_v,
             "rho": rho
         }
     }
 
-
 # =========================================================
-# MODELO 3: MERTON (VOLATILIDAD DIARIA)
+# MODELO 3: MERTON (DIARIO, λ ES POR AÑO)
 # =========================================================
 def backtest_merton(prices_train, prices_test,
                     lam=2.0, mu_j=-0.02, sigma_j=0.05,
@@ -162,50 +166,59 @@ def backtest_merton(prices_train, prices_test,
     train_arr = prices_train.values.astype(float)
     test_arr = prices_test.values.astype(float)
 
+    # Parámetros diarios
     log_ret = np.log(train_arr[1:] / train_arr[:-1])
     mu = np.mean(log_ret)
     sigma = np.std(log_ret)
     dt = 1
+
+    # λ dado en saltos/año -> lo llevamos a saltos/día
+    lam_daily = lam / 252.0
 
     S0 = float(train_arr[-1])
     n_steps = len(test_arr)
 
     rng = np.random.default_rng(seed)
     Z = rng.standard_normal((n_paths, n_steps))
-    Np = rng.poisson(lam * dt, size=(n_paths, n_steps))
+    Np = rng.poisson(lam_daily * dt, size=(n_paths, n_steps))
     J = rng.normal(mu_j, sigma_j, size=(n_paths, n_steps))
 
     S_paths = np.zeros((n_paths, n_steps))
     S_paths[:, 0] = S0
 
     for t in range(1, n_steps):
+        jumps = Np[:, t] * J[:, t]          # tamaño total del salto en log-precio
+
         S_paths[:, t] = (
             S_paths[:, t-1] *
             np.exp(
-                (mu - 0.5*sigma**2) * dt +
+                (mu - 0.5 * sigma**2) * dt +
                 sigma * np.sqrt(dt) * Z[:, t] +
-                (Np[:, t] * J[:, t])
+                jumps
             )
         )
 
     preds = S_paths.mean(axis=0)
 
     rmse_paths = np.sqrt(np.mean((S_paths - test_arr.reshape(1, -1))**2, axis=1))
+    best_idx = rmse_paths.argmin()
 
     return {
         "paths": S_paths,
         "mean": preds,
         "rmse_mean": compute_rmse(test_arr, preds),
         "rmse_each": rmse_paths,
-        "best_traj": S_paths[np.argmin(rmse_paths)],
+        "best_traj": S_paths[best_idx],
         "params": {
             "mu_daily": mu,
             "sigma_daily": sigma,
-            "lambda": lam,
+            "lambda_year": lam,
+            "lambda_daily": lam_daily,
             "mu_j": mu_j,
             "sigma_j": sigma_j
         }
     }
+
 
 
 # =========================================================

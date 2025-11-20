@@ -345,10 +345,10 @@ def main():
             
             # Añadir una línea vertical para separar la zona de entrenamiento/test
             split_date = test_prices.index[0]
-            # CORRECCIÓN CLAVE: Convertir la fecha de inicio del backtest a string
+            # CORRECCIÓN FINAL: Convertir la fecha de inicio del backtest a string y especificar xref="x"
             split_date_str = split_date.strftime('%Y-%m-%d')
             
-            fig.add_vline(x=split_date_str, line_width=2, line_dash="dash", line_color="red", 
+            fig.add_vline(x=split_date_str, xref="x", line_width=2, line_dash="dash", line_color="red", 
                           annotation_text="Inicio del Backtest", 
                           annotation_position="top right")
 

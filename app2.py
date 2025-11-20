@@ -196,10 +196,7 @@ def simulate_merton_paths(S0: float,
 # =========================================================
 def estimate_heston_params(prices: pd.Series):
     """
-    Estimación simplificada para Heston. Idealmente, los parámetros de Heston 
-    (kappa, theta, xi, rho) se estiman usando MLE o métodos GMM, pero aquí 
-    usamos valores históricos simples y valores típicos para los parámetros 
-    de reversión y vol-of-vol.
+    Estimación simplificada para Heston.
     """
     r = compute_log_returns(prices)
     mu_daily = r.mean()
@@ -218,11 +215,6 @@ def estimate_heston_params(prices: pd.Series):
 
     return mu_annual, v0, kappa, theta, xi, rho
 
-# Las ecuaciones diferenciales estocásticas de Heston (SDEs) son:
-# dS_t = mu S_t dt + sqrt(v_t) S_t dW_{S,t}
-# dv_t = kappa (theta - v_t) dt + xi sqrt(v_t) dW_{v,t}
-# Donde dW_{S,t} y dW_{v,t} están correlacionados por rho.
-# 
 
 def simulate_heston_paths(S0: float,
                           mu: float,
@@ -278,8 +270,8 @@ def make_fan_chart(test_index, S_paths, real_prices, title: str):
     S_paths: matriz (n_steps+1, n_paths). Ignoramos t=0 para backtest.
     """
     # El set de prueba tiene n_steps observaciones (t=1 a t=n_steps)
-    n_steps = S_paths.shape[0] - 1
-
+    # Ignorar el S0 (t=0) para la comparación
+    
     # Calcular percentiles para cada paso de tiempo
     percentiles = np.percentile(S_paths[1:, :], [5, 25, 50, 75, 95], axis=1)
     p5, p25, p50, p75, p95 = percentiles
@@ -353,23 +345,36 @@ if st.sidebar.button("Ejecutar modelos", type="primary"):
     # --- División de Datos ---
     train_prices, test_prices = train_test_split_series(prices, test_size=test_size)
     
+    # -----------------------------------------------------
+    # VERIFICACIÓN DE DATOS (Corrección del error reportado)
+    # -----------------------------------------------------
+    if train_prices.empty or test_prices.empty:
+        st.error("Error: Los conjuntos de entrenamiento o prueba están vacíos. Intenta con un período de fechas más largo o reduce la proporción de test.")
+        st.stop()
+        
+    # --- Mostrar Gráfico de Precios ---
     st.subheader(f"Serie de precios: {ticker}")
     st.line_chart(prices)
 
+    # --- Definición de Parámetros de Simulación ---
+    S0 = train_prices.iloc[-1] # Activo Inicial (último precio de entrenamiento)
+    n_steps = len(test_prices)
+    dt = 1 / 252
+    results = {}
+    
+    # --- Mostrar Parámetros de Backtesting ---
     st.markdown("---")
     st.markdown(f"**Parámetros de Backtesting:**")
     col1, col2, col3 = st.columns(3)
-    col1.metric("Activo Inicial ($S_0$)", f"${train_prices.iloc[-1]:.2f}")
+    
+    # Linea corregida (antes 362)
+    col1.metric("Activo Inicial ($S_0$)", f"${S0:.2f}") 
+    
     col2.metric("Período de Entrenamiento", f"{train_prices.index[0].date()} a {train_prices.index[-1].date()} ({len(train_prices)} obs.)")
     col3.metric("Período de Prueba (Backtest)", f"{test_prices.index[0].date()} a {test_prices.index[-1].date()} ({len(test_prices)} obs.)")
     st.markdown("---")
 
 
-    S0 = train_prices.iloc[-1]
-    n_steps = len(test_prices)
-    dt = 1 / 252
-
-    results = {}
     
     # -----------------------------------------------------
     # SIMULACIÓN Y BACKTESTING

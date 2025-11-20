@@ -159,7 +159,7 @@ def backtest_model(df_prices, model_func, model_name, N_paths, T_test_days, **pa
     
     # Asegurarse de que las longitudes coincidan
     
-    # CORRECCIÓN CLAVE: Usamos .values.flatten() para garantizar que sea 1D
+    # Corrección para garantizar que actual_prices sea un array 1D
     actual_prices = test_prices.values.flatten()
     predicted_prices = simulated_mean[1:] 
     
@@ -181,7 +181,7 @@ def backtest_model(df_prices, model_func, model_name, N_paths, T_test_days, **pa
     return rmse, results_df
 
 
-# --- Función Principal de Streamlit (CON LÓGICA DE RESPALDO PARA 'Close') ---
+# --- Función Principal de Streamlit ---
 
 def main():
     st.title("💸 Modelado de Precios de Activos y Backtesting")
@@ -321,12 +321,14 @@ def main():
             st.markdown("---")
             st.subheader("4. Visualización de la Predicción (Backtest)")
             
+            # CORRECCIÓN AQUÍ: Convertir la Serie a DataFrame de forma robusta
+            # Esto evita el error: AttributeError: 'Series' object has no attribute 'to_frame'
+            train_plot = pd.DataFrame(train_prices, columns=['Precio'])
+
+            
             # Combinar los resultados simulados y reales
             combined_df = results_gbm.join(results_heston.iloc[:, 1]).join(results_merton.iloc[:, 1])
             combined_df.columns = ['Precio Real', 'GBM', 'Heston', 'Merton']
-            
-            # Preparar datos de entrenamiento para el gráfico
-            train_plot = train_prices.to_frame(name='Precio')
             
             # Agregar los datos simulados
             plot_df = pd.concat([train_plot, combined_df], axis=0)

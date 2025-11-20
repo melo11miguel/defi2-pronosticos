@@ -24,14 +24,19 @@ st.markdown(
 # =========================================================
 @st.cache_data
 def download_prices(ticker: str, start: str, end: str) -> pd.Series | None:
+    """
+    Descarga precios de Yahoo Finance y devuelve la serie de 'Adj Close' (o similar).
+    """
     data = yf.download(ticker, start=start, end=end)
     if data.empty:
         return None
+
     for col in ["Adj Close", "Close", "close", "adjclose"]:
         if col in data.columns:
             s = data[col].dropna()
             if not s.empty:
                 return s.astype(float)
+
     return None
 
 
@@ -42,7 +47,7 @@ def compute_log_returns(prices: pd.Series) -> pd.Series:
 def train_test_split_series(series: pd.Series, test_size: float = 0.2):
     n = len(series)
     n_test = int(n * test_size)
-    n_test = max(5, min(n - 1, n_test))  # al menos 5 puntos de test
+    n_test = max(5, min(n - 1, n_test))  # al menos 5 observaciones en test
     train = series.iloc[:-n_test]
     test = series.iloc[-n_test:]
     return train, test
@@ -58,12 +63,22 @@ def compute_rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 # MODELO GBM
 # =========================================================
 def estimate_gbm_params(prices: pd.Series):
-    r = compute_log_returns(prices)
-    if r.std() == 0 or len(r) < 2:
-        # fallback si la serie es rara
+    """
+    Estima mu y sigma anuales para un GBM a partir de retornos log.
+    Se asegura de trabajar siempre con numpy (no con Series).
+    """
+    r_series = compute_log_returns(prices)
+    r = r_series.values.astype(float)
+
+    if r.size < 2:
         return 0.0, 0.2
+
     mu_daily = r.mean()
-    sigma_daily = r.std()
+    sigma_daily = r.std(ddof=1)
+
+    if sigma_daily == 0 or np.isnan(sigma_daily):
+        sigma_daily = 0.01
+
     mu_annual = mu_daily * 252
     sigma_annual = sigma_daily * np.sqrt(252)
     return mu_annual, sigma_annual
@@ -74,6 +89,7 @@ def simulate_gbm_paths(S0: float, mu: float, sigma: float,
     np.random.seed(seed)
     S = np.zeros((n_steps + 1, n_paths))
     S[0, :] = S0
+
     mu_dt = (mu - 0.5 * sigma ** 2) * dt
     sigma_sqrt_dt = sigma * np.sqrt(dt)
 
@@ -89,26 +105,36 @@ def simulate_gbm_paths(S0: float, mu: float, sigma: float,
 # =========================================================
 def estimate_merton_params(prices: pd.Series,
                            jump_threshold_sigma: float = 3.0):
-    r = compute_log_returns(prices)
-    if r.std() == 0 or len(r) < 2:
+    """
+    Estima parámetros básicos para Merton.
+    Todo se hace en numpy para evitar ambigüedad de Series.
+    """
+    r_series = compute_log_returns(prices)
+    r = r_series.values.astype(float)
+
+    if r.size < 2:
         return 0.0, 0.2, 0.1, 0.0, 0.01
 
     mu_daily = r.mean()
-    sigma_daily = r.std()
+    sigma_daily = r.std(ddof=1)
+
+    if sigma_daily == 0 or np.isnan(sigma_daily):
+        sigma_daily = 0.01
 
     mu_annual = mu_daily * 252
     sigma_annual = sigma_daily * np.sqrt(252)
 
+    # Saltos
     z_scores = (r - mu_daily) / sigma_daily
     jumps = r[np.abs(z_scores) > jump_threshold_sigma]
 
-    n_days = len(r)
+    n_days = r.size
     years = n_days / 252.0
 
-    if len(jumps) > 0 and years > 0:
-        lam = len(jumps) / years
+    if jumps.size > 0 and years > 0:
+        lam = jumps.size / years
         mu_J = jumps.mean()
-        sigma_J = jumps.std() if len(jumps) > 1 else 0.01
+        sigma_J = jumps.std(ddof=1) if jumps.size > 1 else 0.01
     else:
         lam = 0.1
         mu_J = 0.0
@@ -158,14 +184,21 @@ def simulate_merton_paths(S0: float,
 # MODELO HESTON
 # =========================================================
 def estimate_heston_params(prices: pd.Series):
-    r = compute_log_returns(prices)
-    if r.std() == 0 or len(r) < 2:
-        # parámetros por defecto
+    """
+    Estimación simplificada de parámetros Heston.
+    Todo en numpy para evitar problemas.
+    """
+    r_series = compute_log_returns(prices)
+    r = r_series.values.astype(float)
+
+    if r.size < 2:
         mu_annual = 0.0
         v0 = 0.04
     else:
         mu_daily = r.mean()
-        sigma_daily = r.std()
+        sigma_daily = r.std(ddof=1)
+        if sigma_daily == 0 or np.isnan(sigma_daily):
+            sigma_daily = 0.2
         mu_annual = mu_daily * 252
         v0 = sigma_daily ** 2
 
@@ -190,6 +223,7 @@ def simulate_heston_paths(S0: float,
     np.random.seed(seed)
     S = np.zeros((n_steps + 1, n_paths))
     v = np.zeros((n_steps + 1, n_paths))
+
     S[0, :] = S0
     v[0, :] = max(v0, 1e-8)
 
@@ -221,7 +255,7 @@ def make_fan_chart(test_index, S_paths, real_prices, title: str):
         raise ValueError("Muy pocos pasos para el backtest.")
 
     percentiles = np.percentile(S_paths[1:, :], [5, 25, 50, 75, 95], axis=1)
-    p5, p25, p50, p75, p95 = percentiles  # (n_steps,)
+    p5, p25, p50, p75, p95 = percentiles
 
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.fill_between(test_index, p5, p95, alpha=0.2, label="5%-95%")
@@ -275,7 +309,8 @@ with st.sidebar.expander("Parámetros Heston (opcionales)", expanded=False):
     kappa_manual = st.number_input("kappa (vel. reversión)", value=1.50, min_value=0.0001, format="%.5f")
     theta_manual = st.number_input("theta (var largo plazo)", value=0.04, min_value=0.000001, format="%.6f")
     xi_manual = st.number_input("xi (vol-of-vol)", value=0.50, min_value=0.0001, format="%.5f")
-    rho_manual = st.number_input("rho (correlación)", value=-0.70, min_value=-0.99, max_value=0.99, format="%.3f")
+    rho_manual = st.number_input("rho (correlación)", value=-0.70,
+                                 min_value=-0.99, max_value=0.99, format="%.3f")
 
 # =========================================================
 # EJECUCIÓN

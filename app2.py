@@ -17,6 +17,11 @@ def estimate_gbm_parameters(log_returns):
 
 def simulate_gbm(S0, mu, sigma, T, N_paths, N_steps):
     """Simulación de Movimiento Browniano Geométrico."""
+    # Corrección: Aseguramos que los parámetros de entrada sean escalares (float)
+    S0 = float(S0)
+    mu = float(mu)
+    sigma = float(sigma)
+    
     dt = T / N_steps
     paths = np.zeros((N_steps + 1, N_paths))
     paths[0] = S0
@@ -24,12 +29,16 @@ def simulate_gbm(S0, mu, sigma, T, N_paths, N_steps):
     for t in range(1, N_steps + 1):
         # Generar movimientos brownianos
         dW = np.random.normal(0, np.sqrt(dt), N_paths)
+        # La operación es ahora puramente NumPy, evitando el ValueError
         paths[t] = paths[t-1] * np.exp((mu - 0.5 * sigma**2) * dt + sigma * dW)
         
     return paths
 
 def simulate_heston(S0, V0, mu, kappa, theta, sigma_v, rho, T, N_paths, N_steps):
     """Simulación del Modelo de Heston (volatilidad estocástica)."""
+    S0 = float(S0)
+    mu = float(mu)
+    
     dt = T / N_steps
     paths = np.zeros((N_steps + 1, N_paths))
     v_paths = np.zeros((N_steps + 1, N_paths))
@@ -56,6 +65,10 @@ def simulate_heston(S0, V0, mu, kappa, theta, sigma_v, rho, T, N_paths, N_steps)
 
 def simulate_merton(S0, mu, sigma, lambda_j, m, v, T, N_paths, N_steps):
     """Simulación del Modelo de Merton (Salto-Difusión)."""
+    S0 = float(S0)
+    mu = float(mu)
+    sigma = float(sigma)
+    
     dt = T / N_steps
     paths = np.zeros((N_steps + 1, N_paths))
     paths[0] = S0
@@ -68,11 +81,9 @@ def simulate_merton(S0, mu, sigma, lambda_j, m, v, T, N_paths, N_steps):
         dW = np.random.normal(0, np.sqrt(dt), N_paths)
         
         # Generar el número de saltos (Poisson Process - dN)
-        # Aproximamos el número de saltos en un intervalo dt con una Binomial (o directamente Poisson)
         dN = np.random.poisson(lambda_j * dt, N_paths)
         
         # Generar el tamaño del salto (Jump size - dJ)
-        # El tamaño del salto es un proceso Normal (log-normal en el precio)
         dJ = np.where(dN > 0, np.random.normal(m, v, N_paths), 0.0)
         
         # Sumar todos los componentes
@@ -91,7 +102,8 @@ def backtest_model(df_prices, model_func, model_name, N_paths, T_test_days, **pa
     train_prices = df_prices.iloc[:-T_test_days]
     test_prices = df_prices.iloc[-T_test_days:]
     
-    S0 = train_prices.iloc[-1] # Precio inicial para la simulación
+    # CORRECCIÓN: Convertir S0 a un flotante puro (escalar) para evitar el ValueError
+    S0 = float(train_prices.iloc[-1]) # Precio inicial para la simulación
     
     N_steps = T_test_days
     T = T_test_days / 252.0  # Asumimos 252 días de trading al año
@@ -105,11 +117,15 @@ def backtest_model(df_prices, model_func, model_name, N_paths, T_test_days, **pa
     elif model_name == "Heston":
         # Heston usa mu, V0, kappa, theta, sigma_v, rho
         log_returns = np.log(train_prices / train_prices.shift(1)).dropna()
-        mu, sigma = estimate_gbm_parameters(log_returns) # Reutilizar mu, usar sigma^2 como V0
+        mu, sigma = estimate_gbm_parameters(log_returns) 
+        
+        mu_annualized = float(mu) * 252
+        v0_initial = float(sigma)**2 * 252
+        
         simulated_paths = model_func(
             S0=S0, 
-            mu=mu * 252, # Anualizar mu
-            V0=sigma**2 * 252, # Volatilidad inicial V0 (varianza anualizada)
+            mu=mu_annualized, # Anualizar mu
+            V0=v0_initial, # Volatilidad inicial V0 (varianza anualizada)
             T=T, 
             N_paths=N_paths, 
             N_steps=N_steps,
@@ -121,11 +137,15 @@ def backtest_model(df_prices, model_func, model_name, N_paths, T_test_days, **pa
     elif model_name == "Merton":
         # Merton usa mu, sigma, lambda_j, m, v
         log_returns = np.log(train_prices / train_prices.shift(1)).dropna()
-        mu, sigma = estimate_gbm_parameters(log_returns) # mu y sigma para la difusión
+        mu, sigma = estimate_gbm_parameters(log_returns)
+        
+        mu_annualized = float(mu) * 252
+        sigma_annualized = float(sigma) * np.sqrt(252)
+        
         simulated_paths = model_func(
             S0=S0, 
-            mu=mu * 252, # Anualizar mu
-            sigma=sigma * np.sqrt(252), # Anualizar sigma
+            mu=mu_annualized, # Anualizar mu
+            sigma=sigma_annualized, # Anualizar sigma
             T=T, 
             N_paths=N_paths, 
             N_steps=N_steps,
@@ -210,7 +230,7 @@ def main():
             st.subheader(f"1. Descarga de Datos: {ticker}")
             
             try:
-                # Descargar datos de cierre ajustado
+                # Descargar datos
                 data = yf.download(ticker, start=start_date, end=end_date, progress=False)
 
                 # Verificar si el DataFrame está vacío

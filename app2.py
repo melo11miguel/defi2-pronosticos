@@ -7,7 +7,8 @@ from sklearn.metrics import mean_squared_error
 # --- Configuración de la Aplicación Streamlit ---
 st.set_page_config(layout="wide", page_title="Modelado Financiero y Backtesting")
 
-# --- Funciones de Modelos y Simulación (SIN CAMBIOS) ---
+# --- Funciones de Modelos y Simulación ---
+
 def estimate_gbm_parameters(log_returns):
     """Estima la deriva (mu) y la volatilidad (sigma) para GBM."""
     mu = log_returns.mean()
@@ -84,10 +85,6 @@ def simulate_merton(S0, mu, sigma, lambda_j, m, v, T, N_paths, N_steps):
 def backtest_model(df_prices, model_func, model_name, N_paths, T_test_days, **params):
     """
     Realiza el backtesting y calcula el RMSE.
-    
-    df_prices: DataFrame con precios históricos.
-    model_func: Función de simulación del modelo (e.g., simulate_gbm).
-    T_test_days: Número de días (pasos) para la simulación del backtesting.
     """
     
     # 1. Definir el conjunto de entrenamiento (Train) y prueba (Test)
@@ -96,7 +93,6 @@ def backtest_model(df_prices, model_func, model_name, N_paths, T_test_days, **pa
     
     S0 = train_prices.iloc[-1] # Precio inicial para la simulación
     
-    # Ajustamos T y N_steps para que el período de backtesting tenga sentido temporalmente.
     N_steps = T_test_days
     T = T_test_days / 252.0  # Asumimos 252 días de trading al año
     
@@ -166,7 +162,7 @@ def backtest_model(df_prices, model_func, model_name, N_paths, T_test_days, **pa
     return rmse, results_df
 
 
-# --- Función Principal de Streamlit (MODIFICADA LA SECCIÓN DE DESCARGA) ---
+# --- Función Principal de Streamlit (CON LÓGICA DE RESPALDO PARA 'Close') ---
 
 def main():
     st.title("💸 Modelado de Precios de Activos y Backtesting")
@@ -178,11 +174,11 @@ def main():
         st.header("Configuración de la Aplicación")
         
         # 1. Entrada de Ticker
-        ticker = st.text_input("Ingrese el Símbolo del Activo (Ticker)", "MSFT").upper()
+        ticker = st.text_input("Ingrese el Símbolo del Activo (Ticker)", "AAPL").upper()
         
         # 2. Configuración de Datos
         start_date = st.date_input("Fecha de Inicio de Datos", pd.to_datetime("2020-01-01"))
-        # Usamos today - 1 día como sugerencia para evitar problemas con la descarga
+        # Usamos yesterday como sugerencia predeterminada
         yesterday = pd.to_datetime("today") - pd.Timedelta(days=1)
         end_date = st.date_input("Fecha de Fin de Datos", yesterday)
         
@@ -213,28 +209,32 @@ def main():
             # --- 1. Descarga de Datos ---
             st.subheader(f"1. Descarga de Datos: {ticker}")
             
-            # Usamos un bloque try/except más específico para el error de 'Adj Close'
             try:
                 # Descargar datos de cierre ajustado
                 data = yf.download(ticker, start=start_date, end=end_date, progress=False)
 
                 # Verificar si el DataFrame está vacío
                 if data.empty:
-                    st.error(f"No se encontraron datos históricos para el ticker {ticker} entre {start_date} y {end_date}. Intente con un rango de fechas diferente.")
+                    st.error(f"No se encontraron datos históricos para el ticker {ticker} entre {start_date} y {end_date}. Intente con un rango de fechas diferente o un ticker válido.")
                     return
 
-                # Acceder a la columna 'Adj Close' y verificar su existencia
-                if 'Adj Close' not in data.columns:
-                     st.error(f"Error: La columna 'Adj Close' no se encontró en los datos descargados. Verifique el ticker y el rango de fechas.")
-                     return
-                     
-                df_prices = data['Adj Close'].dropna()
+                # Lógica de Respaldo: Usar 'Close' si 'Adj Close' no existe
+                if 'Adj Close' in data.columns:
+                    df_prices = data['Adj Close'].dropna()
+                    columna_usada = 'Cierre Ajustado (Adj Close)'
+                elif 'Close' in data.columns:
+                    df_prices = data['Close'].dropna()
+                    columna_usada = 'Cierre (Close)'
+                else:
+                    st.error("Error: No se encontró la columna 'Adj Close' ni 'Close' en los datos descargados. Verifique el ticker (símbolo).")
+                    return
+
 
                 if df_prices.empty:
-                    st.error(f"Error: La columna 'Adj Close' está vacía después de limpiar valores nulos. Revise las fechas y el ticker.")
+                    st.error(f"Error: La columna {columna_usada} está vacía después de limpiar valores nulos. Revise las fechas y el ticker.")
                     return
 
-                st.write("Primeras 5 filas de precios de cierre ajustados:")
+                st.write(f"Primeras 5 filas de precios, usando: **{columna_usada}**")
                 st.dataframe(df_prices.head())
                 
                 # Definir conjuntos de entrenamiento y prueba para backtesting
@@ -251,7 +251,6 @@ def main():
 
             # --- 2. Ejecutar Backtesting para los 3 Modelos ---
             st.subheader("2. Resultados del Backtesting y RMSE")
-            
             
             # --- GBM ---
             rmse_gbm, results_gbm = backtest_model(

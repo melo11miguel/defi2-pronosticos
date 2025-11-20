@@ -1,6 +1,5 @@
-yfinance
-numpy
+streamlit==1.36.0
+matplotlib
 pandas
-scipy
-streamlit
-plotly
+numpy
+yfinance

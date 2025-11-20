@@ -1,4 +1,6 @@
-streamlit
-yfinance
+streamlit==1.36.0
+matplotlib
 pandas
 numpy
+yfinance
+scipy
